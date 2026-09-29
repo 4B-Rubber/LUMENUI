@@ -40,6 +40,10 @@ public:
     bool Init(IDWriteFactory* dwrite, ID2D1RenderTarget* target);
     void Shutdown() noexcept;
     bool Enabled() const noexcept;
+    // Full shaped paragraphs (wrap, bidi, arbitrary faces/styles) rasterized by
+    // LumaText. Layout coordinates and origin are physical pixels.
+    bool Paragraph(IDWriteTextLayout* layout, uint64_t identity, D2D1_POINT_2F origin,
+                   D2D1_COLOR_F foreground, D2D1_COLOR_F backdrop, bool prepare);
 
     // bounds 为目标表面的物理像素矩形；scale 用于把 DIP 字号换算成物理字号。
     bool Draw(std::wstring_view text, IDWriteTextFormat* format,

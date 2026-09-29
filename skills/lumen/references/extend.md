@@ -6,12 +6,14 @@
 
 - 新建 `include/lumen/YourControl.h` 和 `src/controls/your_control.cpp`；在 `include/lumen/lumen.h` 与 `CMakeLists.txt` 的现有源列表登记。
 - 公共头声明 Measure/Draw 及必要的属性、事件；新控件在 `tests/api/chain_compile.cpp` 增加 `LUMEN_CHAIN(lumen::YourControl);`。
+- Measure 用 `Bounded(available.w)` 判断约束（不自写 1e4/1e5 阈值）：无约束时返回内容宽或固定默认宽；“撑满”型控件仅在有约束时返回 `available.w`。文字类控件在有约束且更窄时应随之变窄或折行，以便 `Row` 收缩。`tests/visual` 的 `TestLayoutContract` 覆盖此契约，新的撑满型控件加入其第 1 块。
 - 在对应 `examples/gallery/section_*.cpp` 通过 `Sample(...)` 展示有代表性的状态；只有新增类别时才开分区，不限制示例行数。
 - 可离屏渲染且状态具有可观察差异时，在 `tests/visual/main.cpp` 增加状态块和像素断言。行为回归用能暴露故障的测试，不为每个 setter 写重复实现的测试。
 
 ## 绘制、输入与无障碍
 
 - `Draw` 使用 `absolute_`（DIP）和 `theme.*`；绘制、动画与聚光规则见 constraints.md，窗口 overlay 复用 `WindowImpl` 通道，不由控件自行 `CreateWindow`。
+- 自绘多样式文字用 `TextLayout` 的 `TextSpanStyle` / `TextColorSpan` 重载，在 Prepare 中排版与准备、Draw 中只绘制，文字底色提示传 `painter.Backdrop()`；不要逐词 `MeasureText` 自行折行（中日韩无空格会溢出）。
 - 键盘在 `OnKey`，鼠标在 `OnMouseDown/Up/Move`；坐标为控件局部 DIP。
 - 可操作控件覆盖 `Focusable()`，键盘导航 `FocusVisible()` 时通过 `PaintFocusRing` 绘制焦点环；装饰控件按语义开启 `HitTransparent()`。
 - 覆盖 `AutomationType`，可见名走 `AccessibleName`，按实际交互实现需要的 UIA pattern。

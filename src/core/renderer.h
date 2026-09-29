@@ -38,6 +38,15 @@ public:
     // 合成器侧 2D 变换（物理像素）。弹层出现动画用：内容仍按恒等绘制，避免 LumaText 切路径。
     void SetVisualTransform(const D2D1_MATRIX_3X2_F& matrix);
 
+    // 窗口背景层：UI 交换链之下的独立不透明交换链（DComp 兄弟 visual），按 resolution
+    // 缩小渲染、合成器线性放大。每帧只 Present 这一层，UI 不重绘。设备重建后自动重建。
+    bool SetBackdropLayer(bool enabled, float resolution);
+    bool BackdropLayerActive() const noexcept { return backdrop_chain_.get() != nullptr; }
+    bool BackdropNeedsFrame() const noexcept { return backdrop_needs_frame_; }
+    // 在背景层上绘制一帧（像素坐标、单位变换）；与 BeginDraw/EndDraw 不可交错。
+    ID2D1DeviceContext2* BeginBackdrop(int* width_px, int* height_px);
+    bool EndBackdrop();
+
     // 弹层打开期间宿主不要 DwmFlush，避免 DComp 把菜单压回下面。
     static void FlyoutEnter();
     static void FlyoutLeave();
@@ -53,6 +62,11 @@ private:
     bool CreateTargetBitmap();
     bool EnsureRetain();
     bool BlitRetainToSwapchain(const RECT* dirty, UINT dirty_count);
+    bool CreateBackdropLayer();
+    void DestroyBackdropLayer();
+    bool CreateBackdropTarget();
+    void BackdropPixelSize(UINT* w, UINT* h) const noexcept;
+    void UpdateBackdropTransform();
     static bool IsDeviceLost(HRESULT hr) noexcept;
     static LONG flyout_depth_;
 
@@ -73,7 +87,14 @@ private:
     ComPtr<IDXGISwapChain1> swapchain_;
     ComPtr<IDCompositionDevice> comp_;
     ComPtr<IDCompositionTarget> comp_target_;
+    ComPtr<IDCompositionVisual> root_visual_;     // 裁剪/变换挂这里：[背景层, UI]
     ComPtr<IDCompositionVisual> comp_visual_;
+    ComPtr<IDCompositionVisual> backdrop_visual_;
+    ComPtr<IDXGISwapChain1> backdrop_chain_;
+    ComPtr<ID2D1Bitmap1> backdrop_target_;
+    bool backdrop_enabled_ = false;
+    bool backdrop_needs_frame_ = false;
+    float backdrop_resolution_ = 0.5f;
     ComPtr<IDCompositionRectangleClip> corner_clip_;
     ComPtr<ID2D1Factory2> d2d_factory_;
     ComPtr<ID2D1Device1> d2d_device_;

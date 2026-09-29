@@ -49,6 +49,8 @@ int lumen_main(std::span<const std::wstring_view>) {
 
 - Form 字段示例：`Field(L"名称").Validate(validate::Required()).Add<TextBox>().BindText(name)`，提交按钮可 `BindEnabled(form.Valid())`。`validate::Rule` 的独立 struct 支持 `|` 组合，不改成 std::function 别名。
 - 焦点观察用 `OnFocused([](bool){})`；IME 组合态用 `TextBox::Composing()`，不为转发焦点单独派生控件。
+- 严格 ASCII 字段可用 `TextBox::ImeEnabled(false)`；NumberBox 和 ColorPicker 的 hex 字段默认关闭组字。只临时解除本 LUMEN HWND 的输入法上下文，离开字段即恢复，不修改进程语言或宿主窗口。
+- 可编辑 ComboBox 的 `CommitText()` 将精确匹配的文本关联到对应选择项；再次展开定位当前行。下拉可用空间不足时自动使用独立 LUMEN 弹窗，展开操作与 UIA Expand 不阻塞调用方；Tab 提交并进入下一个字段，Esc 只收起下拉。
 - `Confirm` / `Prompt` 用回调；不在 UI 线程 `future.get()` 阻塞消息泵。
 - `RunAsync` 返回 TaskHandle：Cancel 协作取消，Status/Error 查询终态，异常走 OnTaskFailed，窗口销毁后结果 Dropped。跨线程回 UI 用 `Window::Post`；返回 Closed/WakeFailed 表示拒绝且不会执行。
 
@@ -65,7 +67,14 @@ int lumen_main(std::span<const std::wstring_view>) {
 
 ## 浮层与宿主
 
-Toast / Dialog / Drawer 已有亚克力与海拔，不叠加自制半透明黑遮罩。Primary 按钮白底，Danger 用单色警示；追光需按 constraints.md 显式开启。
+Toast / Dialog / Drawer 已有亚克力与海拔，不叠加自制半透明黑遮罩。Primary 按钮白底，Danger 为红色实心警示；错误/警告/成功/信息等特殊状态用 Theme 状态色（见 constraints.md 设计语言），应用侧不自行硬编码 RGB；追光需按 constraints.md 显式开启。
+
+色彩与光的应用侧入口：
+- 图表：`Chart` 默认按 `Theme::chart_series` 上类别色；同页多图用 `PaletteOffset(n)` 错开主色，需要旧的白/灰阶外观时 `Monochrome(true)`。自绘数据系列取 `ChartSeriesColor(theme, i)`。
+- 光色温：`window.LightTone(LightTone::Cool | Warm | Neutral)`，只影响辉光/聚光/镜面线；与 `GlowIntensity` 独立，可同时调节。
+- 一次性结果反馈：`button.Flash(StatusTone::Success)`（Warning / Danger / Info 同理），并配合 `ShowToast(text, ToastKind::…)` 或文字说明结果；颜色只是附加提示。
+
+无标题栏、非模态工具窗用 `WindowSpec.titleBar=false` 与 `owner`。`Show(false)` 显示但不抢原生键盘焦点，仍发送显示事件；`Show()` 保持原有激活行为。不要用长期阻塞的 `ShowPopup` 承载格式条。
 
 `Window::ShowPopup(content, anchor, width, closed)` 借用未挂载的控件树，阻塞至收起；调用期间内容须存活。每个 UI 线程只允许一个会话，重入请求被忽略，不排队。锚点跟随主窗布局/移动，外点、Esc、`ClosePopup()`、锚点失效或主窗隐藏/销毁会收起。正常收起后在 UI 线程调用 `closed`；owner 销毁时不调用。返回后内容解除窗口绑定；超高内容的滚动和复杂编辑器 IME 不属于当前已验收能力。
 
@@ -87,3 +96,42 @@ AutoCAD .arx / 插件 DLL：
 应用代码改动须构建成功并验证受影响的界面/交互；窗口变化检查相关 DPI、Tab 焦点与已开启的聚光。纯文档改动仅核对链接和接口；不触发整库回归。不能自动验证的真实鼠标手感、IME 或宿主操作列为待人工确认。
 
 用 `LUMEN_LOG=path` 或 `SetLogSink` 查看诊断；Gallery F12 可 `DumpTree`。文字质量异常时核对 LumaText 是否启用、DLL 路径/依赖及日志，不把所有问题都归因于漏拷 DLL；库允许回退 DirectWrite。
+
+自绘编辑面的缩放/移动光标通过 `CursorAt()` 返回 `CursorShape::SizeNWSE`、`SizeNESW`、`SizeAll`、`Cross`；原有 Arrow/IBeam/Hand/SizeWE/SizeNS 数值不变，捕获期间仍按捕获控件查询，无需应用层 Win32 光标覆盖。
+
+## 自定义段落与页内编辑
+
+需要自动换行、明确字号/字体、对齐或文档式编辑时，使用 TextBox 的显式段落模式：
+
+```cpp
+TextTypography font;
+font.family = L"Arial";
+font.size = 16.0f; // DIP, not a PDF point value
+font.line_height = 19.2f;
+editor.Multiline(true).Typography(font).WordWrap(true);
+```
+
+`TextTypography` 包含字体族、DIP 字号、字重、斜体、下划线、对齐和可选行高。`WordWrap` 为视觉软换行，不在 Text() 中插入额外换行符。既有单行/硬换行字段默认保持原行为。文档内容可使用 `Chrome(false)` / `ContentPadding(...)`；`Foreground` 与 `SelectionFill` 表示内容颜色，`TextBackdrop` 仅提供文字合成底色提示，不填充背景，也不新增亮色 UI 主题。
+
+混排正文用 `RichLabel`：`Add/Strong/Italic/Secondary/Code/Colored/Tone/Link/Font` 逐段追加，或 `Markup(L"**粗** *斜* `代码` [文字](目标)")` 配合 `OnLink(target)`；`Role(TextRole)` 定基础字号，`Alignment` 控制对齐。中日韩无空格文本按宽折行；`Selectable(true)` 后可拖选（可跨行）、双击选词、Ctrl+A/C。选区限于单个控件：需要整体选中的多段混排写进同一个 RichLabel，段间用 `Add(L"\n")`。左对齐时期望宽度为 `min(内容宽, 可用宽)`，需要占满时用 Stretch 容器或 `Grow()`。RichLabel 只读，不提供富文本编辑。
+
+`TextLayout::Layout(text, typography, spans, width, wrap)` 接受 `TextSpanStyle` 区间（字重、斜体、字号、字体族、下划线、删除线，参与换行与度量）；`Prepare/Draw` 的 `TextColorSpan` 重载按区间换色而不重排，区间须升序且不重叠。
+
+`TextLayout` 共享排版、Lines、HitTest、Caret 与 Selection 几何；它通过现有字体服务排版，再交给 LumaText 字形绘制。普通字体、任意系统字体及斜体不必在进入编辑时切换渲染器。自绘内容先调用 `Prepare`，再调用同帧 `Draw`；几何/字形准备和缓存更新不放在 Draw 中。对象的尺寸和命中位置都是 DIP，DPI 只在 Painter 中转换。
+
+TextBox 的 `ContentSize(width)` 返回不含内边距的内容尺寸；`CaretBounds()` 和 `PlaceCaret(point)` 使用控件局部 DIP；`VisualLineCount()` 统计软/硬换行后的视觉行。IME 组合串参与同一布局；组字取消不删除原选区，提交后才进行一次可撤销替换。程序设置 Text() 仍遵守既有静默/文档重置约定，格式设置不吞掉文字撤销栈。
+
+## 双行列表与外部状态刷新
+
+`ListView::ItemSecondaryText(provider)` 为同一数据行提供副文本（类型、页码、状态等）。与 ItemText 一样，provider 接收数据行下标；重排后仍按 DataIndex 对应原数据。开启副文本后行高至少 52 DIP，测量、绘制、点击命中与滚动使用同一高度；不提供该回调时保持既有单行布局。
+
+外部数据变化后调用 `RefreshItems()`：清除行绘制缓存但不清选中项、滚动或重排状态。替换 provider 或 ItemCount 重设同样会刷新缓存，避免同数量数据更新后继续显示旧内容。读屏/自动化的行名称同时包含主文本与副文本。
+
+```cpp
+list.ItemText([&](size_t row, std::wstring& text) { text = files[row].name; })
+    .ItemSecondaryText([&](size_t row, std::wstring& text) { text = files[row].status; });
+// On the UI thread after updating the external status:
+list.RefreshItems();
+```
+
+副文本不是业务状态存储；转换/合并进度、线程通信与文件事务仍由应用管理。使用 `ProgressBar::Indeterminate(true)` 表示无法准确量化的阶段；只有已知真实分母时设置 Value，不能用动画假装百分比。

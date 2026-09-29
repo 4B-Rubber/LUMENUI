@@ -1,14 +1,26 @@
-// lumen/Theme.h — LUMEN 设计 token。纯黑单色光感体系：亮白发光体压在黑面上建立层次。
+// lumen/Theme.h — LUMEN 设计 token。纯黑底光感体系：亮白发光体压在黑面上建立层次；
+// 危险/警告/成功/信息等特殊状态另用少量状态色区分。
 // Events: 无（本头无订阅事件）
 // Keys: 无独立快捷键（命中穿透或非焦点）
 // Layout: 非布局控件头，或见类声明
 #pragma once
 #include "Animate.h"
 #include "Core.h"
+#include <cstddef>
 
 namespace lumen {
 
 enum class Elevation : uint8_t { Flat = 0, Raised = 1, Overlay = 2, Modal = 3 };
+
+// 光的色温：只给辉光/聚光/镜面线等光感 token 染一层极淡的冷或暖色，文字、accent 与
+// 填充阶梯不变。Neutral 为纯白光（默认）。
+enum class LightTone : uint8_t { Neutral, Cool, Warm };
+
+// 语义状态，供瞬时光效（如 Button::Flash）等按状态取色；颜色见 StatusColor。
+enum class StatusTone : uint8_t { Info, Success, Warning, Danger };
+
+// 图表类别色数量（Theme::chart_series）。
+inline constexpr size_t kChartSeriesCount = 6;
 
 struct Theme {
     // 几何 token（DIP）
@@ -61,6 +73,7 @@ struct Theme {
     Color ambient_flare;         // 窗口顶部环境辉光（晕影中心）
     Color grid_line;             // 背景网格线（恒定，不随强度缩放）
     float glow_intensity;        // 当前全局光效强度 0..1
+    LightTone light_tone = LightTone::Neutral;  // 光感 token 的色温（见 LightTone）
 
     // 强调色（LUMEN 恒为纯白阶，accent 即"光"）
     Color accent;                // 纯白
@@ -73,9 +86,25 @@ struct Theme {
     Color surface_flyout;        // 菜单/弹层底
     Color scrollbar_thumb;
     Color scrollbar_thumb_hover;
-    Color danger;                // 白热警示（单色体系内最亮档）
+
+    // 状态色：只用于需要和常规状态区分的特殊状态（危险/错误、警告、成功、信息）。
+    // 常规悬停/按压/选中/勾选/焦点仍走白色亮度阶梯。状态色不随 glow_intensity 缩放；
+    // 颜色是附加提示，控件仍保留字形或文字。*_subtle 为同色低 alpha 底（字形井、行底、徽标底）。
+    Color danger;                // 危险/错误：文字、描边、状态点、Danger 实心底
     Color danger_hover;
-    Color success;               // 降级为中灰，语义靠字形区分
+    Color danger_pressed;        // Danger 实心底按下
+    Color danger_text;           // Danger 实心底上的文字
+    Color danger_subtle;
+    Color warning;               // 警告
+    Color warning_subtle;
+    Color success;               // 成功/在线
+    Color success_subtle;
+    Color info;                  // 信息
+    Color info_subtle;
+
+    // 图表类别色：暗底提亮的 400 阶，冷暖交替排列，相邻系列/切片色相拉开；刻意避开
+    // 状态色的纯红/纯绿，避免系列被误读为错误/成功。仅用于数据系列，不作装饰或控件状态。
+    Color chart_series[kChartSeriesCount];
 
     // 动效 token。motion_scale=0 表示系统关闭客户区动画（SPI_GETCLIENTAREAANIMATION）。
     float duration_fast = 0.12f;
@@ -109,7 +138,26 @@ struct ThemeOverride {
 
 Theme ApplyThemeOverride(const Theme& base, const ThemeOverride& o) noexcept;
 
-// glow_intensity ∈ [0,1]：缩放全部辉光/聚光 token 的 alpha。
-Theme MakeTheme(float glow_intensity = 1.0f);
+// glow_intensity ∈ [0,1]：缩放全部辉光/聚光 token 的 alpha；tone 为光感 token 色温。
+Theme MakeTheme(float glow_intensity = 1.0f, LightTone tone = LightTone::Neutral);
+
+// 状态 → 主题状态色（danger / warning / success / info）。
+inline Color StatusColor(const Theme& theme, StatusTone tone) noexcept {
+    switch (tone) {
+    case StatusTone::Success: return theme.success;
+    case StatusTone::Warning: return theme.warning;
+    case StatusTone::Danger: return theme.danger;
+    case StatusTone::Info:
+    default: return theme.info;
+    }
+}
+
+// 第 index 个图表系列色；超过 kChartSeriesCount 后循环并逐轮压暗，保持可区分。
+inline Color ChartSeriesColor(const Theme& theme, size_t index) noexcept {
+    const Color base = theme.chart_series[index % kChartSeriesCount];
+    const size_t round = index / kChartSeriesCount;
+    const float k = round == 0 ? 1.0f : (round == 1 ? 0.72f : 0.52f);
+    return {base.r * k, base.g * k, base.b * k, base.a};
+}
 
 } // namespace lumen

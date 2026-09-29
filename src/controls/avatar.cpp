@@ -49,9 +49,10 @@ void Avatar::Draw(Painter& painter, const Theme& theme) {
         const Rect ring_rect{circle.Right() - ring * 0.75f, circle.Bottom() - ring * 0.75f, ring,
                              ring};
         painter.FillRoundedRect(ring_rect, ring * 0.5f, theme.bg);
-        Color state = theme.text_disabled;   // Away
-        if (presence_ == Presence::Online) state = theme.accent;
-        if (presence_ == Presence::Busy) state = theme.text;
+        // 在线状态是特殊状态：绿/琥珀/红，比亮度阶梯更易分辨。
+        Color state = theme.warning;   // Away
+        if (presence_ == Presence::Online) state = theme.success;
+        if (presence_ == Presence::Busy) state = theme.danger;
         painter.FillRoundedRect({ring_rect.x + 2.0f, ring_rect.y + 2.0f, dot, dot}, dot * 0.5f,
                                 state);
     }

@@ -99,10 +99,13 @@ void ToggleButton::Draw(Painter& painter, const Theme& theme) {
                        : absolute_;
     const float radius = pill_ ? r.h * 0.5f : theme.radius_control;
 
+    const bool toned = foreground_.a > 0.0f;
+    const Color light = toned ? foreground_ : theme.accent;   // 描边/辉光 RGB
     Color fill = theme.fill_input;
-    Color border{theme.accent.r, theme.accent.g, theme.accent.b,
-                 0.20f * theme.glow_intensity};
-    Color foreground = theme.text;
+    Color border{light.r, light.g, light.b, 0.20f * theme.glow_intensity};
+    Color foreground = toned ? Color{foreground_.r, foreground_.g, foreground_.b,
+                                     checked_ ? foreground_.a : theme.text_secondary.a}
+                             : theme.text;
     float glow_a = 0.0f;
     if (!enabled_) {
         fill = theme.fill_input_disabled;
@@ -126,12 +129,12 @@ void ToggleButton::Draw(Painter& painter, const Theme& theme) {
         if (pill_) {
             // Dilated capsule, not DrawGlow's AABB quads (those flash box ears on a pill).
             const float ring = 5.0f;
-            Color halo = theme.glow_sm;
+            Color halo = toned ? light : theme.glow_sm;
             halo.a = glow_a * 0.55f;
             painter.FillRoundedRect(r.Inset(-ring, -ring), radius + ring, halo);
         } else {
-            painter.DrawGlow(r, radius, Color{theme.glow_sm.r, theme.glow_sm.g, theme.glow_sm.b, glow_a},
-                             1.0f);
+            const Color glow_rgb = toned ? light : theme.glow_sm;
+            painter.DrawGlow(r, radius, Color{glow_rgb.r, glow_rgb.g, glow_rgb.b, glow_a}, 1.0f);
         }
     }
     painter.FillRoundedRect(r, radius, fill);

@@ -52,6 +52,14 @@ int lumen_main(std::span<const std::wstring_view> args) {
     window.MinSize({960.0f, 640.0f});
     if (!screenshot.empty()) window.Motion(MotionMode::Off);
     window.Backdrop(debug_backdrop ? Backdrop::All : Backdrop::None);
+    window.LightTone(LightTone::Cool);   // Gallery 默认冷白光；Overview > Glow intensity 可切换
+    {
+        // 流体背景：UI 之下的独立合成层，只在窗口激活时以 30 fps 播放。截图模式保持纯背景。
+        ShaderBackdrop fluid;
+        fluid.enabled = screenshot.empty();
+        fluid.kind = ShaderKind::Flow;
+        window.BackdropShader(fluid);
+    }
     window.PerfHud(perf_hud);
     window.BindShortcut(L"F11", [&window] { window.PerfHud(!window.PerfHud()); });
     window.Icon(IDR_LUMEN_GALLERY_ICO);
@@ -155,7 +163,7 @@ int lumen_main(std::span<const std::wstring_view> args) {
         painter.BeginFrame(dc, &UiText(), capture_scale);
         LumaTextBridge capture_text;
         if (capture_text.Init(UiText().Factory(), dc)) painter.SetLumaText(&capture_text);
-        const Theme theme = MakeTheme(g_glow.Get());
+        const Theme theme = MakeTheme(g_glow.Get(), window.LightTone());
         painter.FillRect({0.0f, 0.0f, viewport.w, viewport.h}, theme.bg);
         DrawControlTree(painter, theme, &root);
         painter.EndFrame();

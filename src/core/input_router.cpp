@@ -66,6 +66,7 @@ void WindowImpl::OnHwndFocus(bool gained) {
         return;
     }
     keyboard_focus_ = false;
+    pointer_click_.Cancel();
     if (focused_) {
         focus_restore_ = focused_;
         SetFocusControl(nullptr);
@@ -603,6 +604,14 @@ void WindowImpl::HandlePointerClient(int px, int py, DWORD type, int phase, uint
                                      uint32_t changed) {
     touch_input_ = type == PT_TOUCH;
     hit_slop_dip_ = touch_input_ ? 8.0f : 0.0f;
+    const Point pixels{static_cast<float>(px), static_cast<float>(py)};
+    const Point click_dip{pixels.x / scale_, pixels.y / scale_};
+    const UINT dpi = hwnd_ ? GetDpiForWindow(hwnd_) : 96;
+    const Point drag_extent{
+        static_cast<float>(std::max(1, GetSystemMetricsForDpi(SM_CXDRAG, dpi) / 2)),
+        static_cast<float>(std::max(1, GetSystemMetricsForDpi(SM_CYDRAG, dpi) / 2))};
+    const uint32_t button = changed ? changed : MK_LBUTTON;
+    const bool click_source = type == PT_MOUSE || type == PT_PEN;
     if (phase == 0) {
         pan_origin_px_ = POINT{px, py};
         pan_last_px_ = pan_origin_px_;
@@ -611,16 +620,39 @@ void WindowImpl::HandlePointerClient(int px, int py, DWORD type, int phase, uint
         pan_vy_ = 0.0f;
         panning_ = false;
         pan_target_ = nullptr;
-        OnMouseButton(px, py, buttons, true, changed ? changed : MK_LBUTTON);
+        const auto tick = static_cast<uint32_t>(GetMessageTime());
+        auto port = port_;
+        OnMouseButton(px, py, buttons, true, button);
+        if (!port->target.load(std::memory_order_acquire)) return;
+        if (click_source && button == MK_LBUTTON) {
+            const Point extent{
+                static_cast<float>(std::max(1, GetSystemMetricsForDpi(SM_CXDOUBLECLK, dpi) / 2)),
+                static_cast<float>(std::max(1, GetSystemMetricsForDpi(SM_CYDOUBLECLK, dpi) / 2))};
+            // EnableMouseInPointer routes real mouse input here without a
+            // guaranteed WM_LBUTTONDBLCLK. Recognize a completed click pair on
+            // the same live control, after the normal press has routed safely.
+            if (pointer_click_.Down(captured_, pixels, tick, type, extent, GetDoubleClickTime())) {
+                WeakRef<Control> target(captured_);
+                if (target) target->OnMouseDoubleClick(ToLocal(target.Get(), click_dip));
+            }
+        } else pointer_click_.Cancel();
         return;
     }
     if (phase == 1) {
+        pointer_click_.Move(pixels, drag_extent);
         TryBeginPan(px, py);
         if (panning_ && pan_target_) ApplyPanMove(px, py);
         else OnMouseMove(px, py, buttons);
         return;
     }
-    if (phase == 2) {
+    if (phase == 2 || phase == 4) {
+        if (phase == 4) {
+            // Releasing our own capture after Up must not erase the completed
+            // click; an externally cancelled press must never arm one.
+            if (pointer_click_.Pressed()) pointer_click_.Cancel();
+        } else if (click_source && button == MK_LBUTTON && !panning_) {
+            pointer_click_.Up(HitTest(click_dip), pixels, drag_extent);
+        } else pointer_click_.Cancel();
         if (panning_ && pan_target_) {
             pan_target_->PanFling(pan_vx_, pan_vy_);
             pan_target_ = nullptr;
@@ -640,6 +672,7 @@ void WindowImpl::HandlePointerClient(int px, int py, DWORD type, int phase, uint
         pointer_id_ = 0;
         return;
     }
+    pointer_click_.Cancel();
     tracking_mouse_ = false;
     panning_ = false;
     pan_target_ = nullptr;
@@ -726,7 +759,8 @@ bool WindowImpl::OnPointer(UINT msg, WPARAM wparam, LPARAM lparam) {
         return true;
     }
     if (msg == WM_POINTERUP || msg == WM_POINTERCAPTURECHANGED) {
-        HandlePointerClient(client.x, client.y, info.pointerType, 2, buttons, changed);
+        HandlePointerClient(client.x, client.y, info.pointerType,
+                            msg == WM_POINTERUP ? 2 : 4, buttons, changed);
         return true;
     }
     if (msg == WM_POINTERLEAVE) {

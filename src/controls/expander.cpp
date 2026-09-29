@@ -51,15 +51,22 @@ bool Expander::OnAnimate(float dt) {
 
 Size Expander::Measure(Size available, const Theme& theme) {
     float content_h = 0.0f;
+    float content_w = 0.0f;
     bool first = true;
     for (size_t i = 0; i < children_.size(); ++i) {
         if (!ChildVisible(i)) continue;
-        const Size desired = MeasureChildAt(i, {available.w - 28.0f, 1.0e5f}, theme);
+        const bool bounded = Bounded(available.w);
+        const Size desired =
+            MeasureChildAt(i, {bounded ? std::max(0.0f, available.w - 28.0f) : kUnbounded, kUnbounded}, theme);
         content_h += desired.h + (first ? 0.0f : 8.0f);
+        content_w = std::max(content_w, desired.w + 28.0f);
         first = false;
     }
     const float extra = children_.empty() ? 0.0f : content_h + kContentPad;
-    return {std::max(available.w, 240.0f), kHeaderHeight + extra * open_t_};
+    // 无约束宽度时返回自然宽（内容 / 标题），不把哨兵值当期望宽度。
+    const float natural = std::max({240.0f, content_w, MeasureText(title_, TextRole::Body).w + 80.0f});
+    const float width = Bounded(available.w) ? std::max(available.w, 240.0f) : natural;
+    return {width, kHeaderHeight + extra * open_t_};
 }
 
 void Expander::Arrange(const Rect& absolute) {

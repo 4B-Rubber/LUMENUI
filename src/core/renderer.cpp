@@ -133,9 +133,12 @@ bool Renderer::CreateDeviceResources() {
     }
     if (FAILED(comp_->CreateVisual(&comp_visual_))) return false;
     comp_visual_->SetContent(swapchain_.get());
+    // 根 visual 承载圆角裁剪与整体变换；UI 与可选背景层是它的子级（背景层在下）。
+    if (FAILED(comp_->CreateVisual(&root_visual_))) return false;
+    if (FAILED(root_visual_->AddVisual(comp_visual_.get(), TRUE, nullptr))) return false;
     if (!UpdateCornerClip()) return false;
     const bool visible = composition_hwnd_ == hwnd_ || (GetWindowLongPtrW(hwnd_, GWL_STYLE) & WS_VISIBLE);
-    comp_target_->SetRoot(visible ? comp_visual_.get() : nullptr);
+    comp_target_->SetRoot(visible ? root_visual_.get() : nullptr);
     comp_->Commit();
 
     if (FAILED(D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, IID_PPV_ARGS(&d2d_factory_))))
@@ -163,6 +166,125 @@ bool Renderer::CreateDeviceResources() {
             Log(LogLevel::Warn, L"LumaText unavailable; using DirectWrite");
         }
     }
+    if (backdrop_enabled_ && !CreateBackdropLayer()) {
+        Log(LogLevel::Warn, L"Renderer backdrop layer unavailable; drawing flat background");
+        DestroyBackdropLayer();
+    }
+    return true;
+}
+
+void Renderer::BackdropPixelSize(UINT* w, UINT* h) const noexcept {
+    const float res = backdrop_resolution_;
+    *w = static_cast<UINT>(std::max(1.0f, std::ceil(static_cast<float>(width_) * res)));
+    *h = static_cast<UINT>(std::max(1.0f, std::ceil(static_cast<float>(height_) * res)));
+}
+
+void Renderer::UpdateBackdropTransform() {
+    if (!backdrop_visual_) return;
+    UINT w = 0, h = 0;
+    BackdropPixelSize(&w, &h);
+    backdrop_visual_->SetTransform(D2D1::Matrix3x2F::Scale(
+        static_cast<float>(width_) / static_cast<float>(w),
+        static_cast<float>(height_) / static_cast<float>(h)));
+}
+
+bool Renderer::CreateBackdropTarget() {
+    if (!dc_ || !backdrop_chain_) return false;
+    backdrop_target_.reset();
+    ComPtr<IDXGISurface> surface;
+    if (FAILED(backdrop_chain_->GetBuffer(0, IID_PPV_ARGS(&surface)))) return false;
+    D2D1_BITMAP_PROPERTIES1 props = D2D1::BitmapProperties1(
+        D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
+        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE), 96.0f, 96.0f);
+    return SUCCEEDED(dc_->CreateBitmapFromDxgiSurface(surface.get(), &props, &backdrop_target_));
+}
+
+bool Renderer::CreateBackdropLayer() {
+    if (!comp_ || !root_visual_ || !comp_visual_ || !dxgi_ || !d3d_ || !dc_) return false;
+    if (backdrop_chain_) return true;
+    ComPtr<IDXGIAdapter> adapter;
+    if (FAILED(dxgi_->GetAdapter(&adapter))) return false;
+    ComPtr<IDXGIFactory2> factory;
+    if (FAILED(adapter->GetParent(IID_PPV_ARGS(&factory)))) return false;
+    UINT w = 0, h = 0;
+    BackdropPixelSize(&w, &h);
+    DXGI_SWAP_CHAIN_DESC1 desc{};
+    desc.Width = w;
+    desc.Height = h;
+    desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    desc.SampleDesc.Count = 1;
+    desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+    desc.BufferCount = 2;
+    desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
+    desc.Scaling = DXGI_SCALING_STRETCH;
+    desc.AlphaMode = DXGI_ALPHA_MODE_IGNORE;   // 背景层不透明
+    if (FAILED(factory->CreateSwapChainForComposition(d3d_.get(), &desc, nullptr, &backdrop_chain_)))
+        return false;
+    if (FAILED(comp_->CreateVisual(&backdrop_visual_))) return false;
+    if (FAILED(backdrop_visual_->SetContent(backdrop_chain_.get()))) return false;
+    backdrop_visual_->SetBitmapInterpolationMode(DCOMPOSITION_BITMAP_INTERPOLATION_MODE_LINEAR);
+    UpdateBackdropTransform();
+    // 明确插在 UI visual 之后（下方）。
+    if (FAILED(root_visual_->AddVisual(backdrop_visual_.get(), FALSE, comp_visual_.get()))) return false;
+    if (!CreateBackdropTarget()) return false;
+    if (FAILED(comp_->Commit())) return false;
+    backdrop_needs_frame_ = true;
+    return true;
+}
+
+void Renderer::DestroyBackdropLayer() {
+    if (root_visual_ && backdrop_visual_) root_visual_->RemoveVisual(backdrop_visual_.get());
+    backdrop_target_.reset();
+    backdrop_visual_.reset();
+    backdrop_chain_.reset();
+    backdrop_needs_frame_ = false;
+    if (comp_) comp_->Commit();
+}
+
+bool Renderer::SetBackdropLayer(bool enabled, float resolution) {
+    const float res = std::isfinite(resolution) ? std::clamp(resolution, 0.25f, 1.0f) : 0.5f;
+    const bool res_changed = res != backdrop_resolution_;
+    backdrop_enabled_ = enabled;
+    backdrop_resolution_ = res;
+    if (!enabled) {
+        DestroyBackdropLayer();
+        return true;
+    }
+    if (res_changed && backdrop_chain_) DestroyBackdropLayer();
+    if (!ready_ || !dc_) return false;   // 设备建好后 CreateDeviceResources 会补建
+    if (CreateBackdropLayer()) return true;
+    DestroyBackdropLayer();
+    return false;
+}
+
+ID2D1DeviceContext2* Renderer::BeginBackdrop(int* width_px, int* height_px) {
+    if (!dc_ || !backdrop_target_) return nullptr;
+    const D2D1_SIZE_U size = backdrop_target_->GetPixelSize();
+    if (width_px) *width_px = static_cast<int>(size.width);
+    if (height_px) *height_px = static_cast<int>(size.height);
+    dc_->SetTarget(backdrop_target_.get());
+    dc_->BeginDraw();
+    dc_->SetTransform(D2D1::Matrix3x2F::Identity());
+    return dc_.get();
+}
+
+bool Renderer::EndBackdrop() {
+    if (!dc_) return false;
+    const HRESULT hr = dc_->EndDraw();
+    dc_->SetTarget(nullptr);
+    if (FAILED(hr)) {
+        if (IsDeviceLost(hr)) device_lost_ = true;
+        return false;
+    }
+    if (!backdrop_chain_) return false;
+    // 不等垂直同步：背景层自己的节拍由窗口计时器决定，绝不阻塞 UI 线程。
+    const HRESULT presented = backdrop_chain_->Present(0, DXGI_PRESENT_DO_NOT_WAIT);
+    if (presented == DXGI_ERROR_WAS_STILL_DRAWING) return false;
+    if (FAILED(presented)) {
+        if (IsDeviceLost(presented)) device_lost_ = true;
+        return false;
+    }
+    backdrop_needs_frame_ = false;
     return true;
 }
 
@@ -210,6 +332,11 @@ void Renderer::ReleaseDeviceResources() {
     d2d_factory_.reset();
     if (comp_target_) comp_target_->SetRoot(nullptr);
     if (comp_) comp_->Commit();
+    backdrop_target_.reset();
+    backdrop_visual_.reset();
+    backdrop_chain_.reset();
+    backdrop_needs_frame_ = false;
+    root_visual_.reset();
     comp_visual_.reset();
     corner_clip_.reset();
     comp_target_.reset();
@@ -228,8 +355,8 @@ void Renderer::Shutdown() {
 
 void Renderer::SetCompositionVisible(bool visible) {
     // 内容挂在父窗后不会随子窗自动隐藏，显式同步；计时器和输入仍归子窗。
-    if (composition_hwnd_ != hwnd_ && comp_target_ && comp_visual_ && comp_) {
-        comp_target_->SetRoot(visible ? comp_visual_.get() : nullptr);
+    if (composition_hwnd_ != hwnd_ && comp_target_ && root_visual_ && comp_) {
+        comp_target_->SetRoot(visible ? root_visual_.get() : nullptr);
         comp_->Commit();
     }
 }
@@ -242,10 +369,10 @@ bool Renderer::SetCornerRadius(float radius_px) {
 }
 
 bool Renderer::UpdateCornerClip() {
-    if (!comp_ || !comp_visual_) return false;
+    if (!comp_ || !root_visual_) return false;
     HRESULT hr = S_OK;
     if (corner_radius_ <= 0.0f) {
-        hr = comp_visual_->SetClip(static_cast<IDCompositionClip*>(nullptr));
+        hr = root_visual_->SetClip(static_cast<IDCompositionClip*>(nullptr));
     } else {
         if (!corner_clip_) hr = comp_->CreateRectangleClip(&corner_clip_);
         const float radius = std::min(corner_radius_, std::min(width_, height_) * 0.5f);
@@ -261,7 +388,7 @@ bool Renderer::UpdateCornerClip() {
         if (SUCCEEDED(hr)) hr = corner_clip_->SetBottomLeftRadiusY(radius);
         if (SUCCEEDED(hr)) hr = corner_clip_->SetBottomRightRadiusX(radius);
         if (SUCCEEDED(hr)) hr = corner_clip_->SetBottomRightRadiusY(radius);
-        if (SUCCEEDED(hr)) hr = comp_visual_->SetClip(corner_clip_.get());
+        if (SUCCEEDED(hr)) hr = root_visual_->SetClip(corner_clip_.get());
     }
     if (SUCCEEDED(hr)) hr = comp_->Commit();
     if (FAILED(hr))
@@ -293,6 +420,21 @@ void Renderer::Resize(int width_px, int height_px) {
     if (!CreateTargetBitmap()) {
         Log(L"CreateTargetBitmap failed after resize size=%dx%d", width_px, height_px);
         device_lost_ = true;
+        return;
+    }
+    if (backdrop_chain_) {
+        backdrop_target_.reset();
+        UINT bw = 0, bh = 0;
+        BackdropPixelSize(&bw, &bh);
+        const HRESULT bhr = backdrop_chain_->ResizeBuffers(0, bw, bh, DXGI_FORMAT_UNKNOWN, 0);
+        if (FAILED(bhr) || !CreateBackdropTarget()) {
+            Log(LogLevel::Warn, L"Renderer backdrop resize failed hr=0x%08lX; layer dropped", bhr);
+            DestroyBackdropLayer();
+        } else {
+            UpdateBackdropTransform();
+            backdrop_needs_frame_ = true;
+            if (comp_) comp_->Commit();
+        }
     }
 }
 
@@ -410,7 +552,7 @@ bool Renderer::EndDraw(bool wait_vsync, const RECT* dirty, UINT dirty_count) {
 }
 
 void Renderer::SetVisualTransform(const D2D1_MATRIX_3X2_F& matrix) {
-    if (comp_visual_) comp_visual_->SetTransform(matrix);
+    if (root_visual_) root_visual_->SetTransform(matrix);
 }
 
 bool Renderer::Recover() {

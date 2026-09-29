@@ -11,6 +11,7 @@
 #include "com_ptr.h"
 #include "renderer.h"
 #include "dispatch_state.h"
+#include "pointer_click.h"
 #include "text_service.h"
 #include <windows.h>
 #include <d2d1_3.h>
@@ -96,7 +97,7 @@ public:
     static void CloseTransient(Window* window);
     static bool TransientActive(Window* window, const Control* overlay = nullptr);
 
-    void Show();
+    void Show(bool activate = true);
     void Close();
     bool Closed() const noexcept { return closed_; }
     void Title(std::wstring_view text);
@@ -111,8 +112,13 @@ public:
     void ClearFocus();
     void OnHwndFocus(bool gained);
     void GlowIntensity(float intensity);
+    void SetLightTone(lumen::LightTone tone);
     void PerfHud(bool on);
     void SetBackdrop(Backdrop backdrop);
+    void SetShaderBackdrop(const ShaderBackdrop& fx);
+    void RenderShaderBackdrop(bool advance);
+    void UpdateShaderBackdropTimer();
+    bool ShaderBackdropPlaying() const;
     void ShowDialog(Dialog& dialog);
     void ShowDialog(std::unique_ptr<Dialog> dialog);
     void ShowDialog(DialogSpec spec);
@@ -179,6 +185,8 @@ public:
     void* NativeHandle() const noexcept { return hwnd_; }
     StackPanel& Root() noexcept { return *root_; }
     TitleBar* TitleBarPtr() noexcept { return title_bar_.get(); }
+    void SetCaptionVisible(bool visible);
+    bool CaptionShown() const noexcept { return !caption_collapsed_; }
     Theme& ThemeRef() noexcept { return theme_; }
     float Scale() const noexcept { return scale_; }
     HWND Hwnd() const noexcept { return hwnd_; }
@@ -294,8 +302,14 @@ private:
 
     Renderer renderer_;
     Painter painter_;
+    Painter backdrop_painter_;           // 背景层专用（独立状态，不与 UI 帧交错）
+    ShaderBackdrop shader_backdrop_{};
+    float shader_backdrop_time_ = 0.0f;
+    LARGE_INTEGER shader_backdrop_qpc_{};
+    bool shader_backdrop_timer_ = false;
     Theme theme_;
     float glow_intensity_ = 0.5f;
+    lumen::LightTone light_tone_ = lumen::LightTone::Neutral;
     MotionMode motion_mode_ = MotionMode::System;
     Backdrop backdrop_ = Backdrop::None;
     ComPtr<ID2D1Bitmap1> backdrop_cache_;
@@ -313,6 +327,7 @@ private:
 
     std::unique_ptr<StackPanel> root_;
     std::unique_ptr<TitleBar> title_bar_;
+    bool caption_collapsed_ = false;  // CaptionVisible(false)：标题区高度为 0
     Control* hovered_ = nullptr;
     Control* captured_ = nullptr;
     Control* focused_ = nullptr;
@@ -322,6 +337,7 @@ private:
     float hit_slop_dip_ = 0.0f;
     LONG pointer_msg_time_ = 0;
     UINT32 pointer_id_ = 0;
+    PointerClick pointer_click_;
     bool panning_ = false;
     Control* pan_target_ = nullptr;
     POINT pan_origin_px_{};
@@ -396,6 +412,7 @@ private:
     // 牌堆静止后帧循环停止（WM_PAINT 优先级高于 WM_TIMER，常驻帧循环会饿死业务定时器），
     // 用一次性 WM_TIMER 在下一次出生/到期时刻唤醒做一次重绘检查。
     static constexpr UINT_PTR kToastWakeTimerId = 0x51A5;
+    static constexpr UINT_PTR kShaderBackdropTimerId = 0x4C554D42;
     bool toast_wake_armed_ = false;
     double toast_wake_at_ = 0.0;
     ToastMotion toast_motion_ = ToastMotion::Fade;
@@ -462,6 +479,8 @@ private:
     bool in_size_move_ = false;
     bool tracking_mouse_ = false;
     bool ime_syncing_ = false;
+    bool ime_detached_ = false;
+    void* saved_ime_context_ = nullptr;   // Borrowed HIMC, never destroyed by LUMEN.
     // 原生会话覆盖首个组字串之前、结果上屏之后的字符消息空隙。
     WeakRef<Control> native_ime_target_;
     LARGE_INTEGER last_tick_{};

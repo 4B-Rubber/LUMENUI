@@ -24,7 +24,13 @@ void FillArea(Painter& painter, const Point* pts, size_t n, const Rect& box, Col
     }
 }
 
-void DrawPeak(Painter& painter, const Theme& theme, const Point* pts, size_t n, const float* ys,
+Color WithAlpha(Color c, float a) noexcept { return {c.r, c.g, c.b, a}; }
+
+Color Mix(Color a, Color b, float t) noexcept {
+    return {Lerp(a.r, b.r, t), Lerp(a.g, b.g, t), Lerp(a.b, b.b, t), Lerp(a.a, b.a, t)};
+}
+
+void DrawPeak(Painter& painter, Color glow, const Point* pts, size_t n, const float* ys,
               size_t yn) {
     if (n == 0 || yn == 0) return;
     size_t peak = 0;
@@ -34,7 +40,7 @@ void DrawPeak(Painter& painter, const Theme& theme, const Point* pts, size_t n, 
     const float t = yn <= 1 ? 0.0f : static_cast<float>(peak) / static_cast<float>(yn - 1);
     const size_t pi = n <= 1 ? 0 : static_cast<size_t>(t * static_cast<float>(n - 1) + 0.5f);
     const Point p = pts[std::min(pi, n - 1)];
-    painter.FillRoundedRect({p.x - 2.5f, p.y - 2.5f, 5.0f, 5.0f}, 2.5f, theme.glow_sm);
+    painter.FillRoundedRect({p.x - 2.5f, p.y - 2.5f, 5.0f, 5.0f}, 2.5f, glow);
 }
 
 void DrawXLabels(Painter& painter, const Theme& theme, const Rect& box, const std::wstring* labels,
@@ -540,7 +546,8 @@ void Chart::DrawLegend(Painter& painter, const Theme& theme) const {
         const Rect r{absolute_.x + local.x, absolute_.y + local.y, local.w, local.h};
         const bool on = SeriesVisible(i);
         const Color ink = on ? (i == 0 ? theme.text : theme.text_secondary) : theme.text_disabled;
-        painter.FillRoundedRect({r.x + 2.0f, r.y + 5.0f, 8.0f, 8.0f}, 4.0f, ink);
+        painter.FillRoundedRect({r.x + 2.0f, r.y + 5.0f, 8.0f, 8.0f}, 4.0f,
+                                on ? SeriesInk(theme, i, 2) : theme.text_disabled);
         std::wstring_view name = L"Value";
         if (i == 0) name = series_name_.empty() ? std::wstring_view(L"Active") : series_name_;
         else name = baseline_name_.empty() ? std::wstring_view(L"Baseline") : baseline_name_;
@@ -553,6 +560,17 @@ void Chart::DrawLegend(Painter& painter, const Theme& theme) const {
     }
 }
 
+Color Chart::SeriesInk(const Theme& theme, size_t index, size_t count) const noexcept {
+    if (!mono_) return ChartSeriesColor(theme, index + palette_offset_);
+    // 单色形态：Donut 按下标递减灰阶；其余主系列白、基线次要灰。
+    if (kind_ == ChartKind::Donut) {
+        const float t = count <= 1 ? 1.0f
+                                   : 1.0f - static_cast<float>(index) / static_cast<float>(count - 1);
+        return chart_geom::Tone(theme, t);
+    }
+    return index == 0 ? theme.text : theme.text_secondary;
+}
+
 void Chart::DrawCartesianHover(Painter& painter, const Theme& theme, const Rect& box,
                                const Point* src, const float* ys, size_t n, bool has_b,
                                const Point* bsrc, const float* bys) const {
@@ -563,14 +581,16 @@ void Chart::DrawCartesianHover(Painter& painter, const Theme& theme, const Rect&
     const size_t hi = std::min(chart_geom::HoverIndex(box, absolute_.x + mouse_local_.x, n), n - 1);
     const Point anchor = vis0 ? src[hi] : bsrc[hi];
     chart_geom::DrawCrosshair(painter, theme, box, anchor);
+    const Color c0 = SeriesInk(theme, 0, 2);
+    const Color c1 = SeriesInk(theme, 1, 2);
     if (vis1) {
         chart_geom::FillDot(painter, bsrc[hi], 4.0f, theme.bg);
-        chart_geom::StrokeDot(painter, bsrc[hi], 4.0f, theme.text, 1.2f);
+        chart_geom::StrokeDot(painter, bsrc[hi], 4.0f, mono_ ? theme.text : c1, 1.2f);
     }
     if (vis0) {
-        chart_geom::FillDot(painter, src[hi], 6.5f, theme.fill_selected);
-        chart_geom::StrokeDot(painter, src[hi], 6.5f, theme.text_secondary, 1.5f);
-        chart_geom::FillDot(painter, src[hi], 3.6f, theme.text);
+        chart_geom::FillDot(painter, src[hi], 6.5f, mono_ ? theme.fill_selected : WithAlpha(c0, 0.22f));
+        chart_geom::StrokeDot(painter, src[hi], 6.5f, mono_ ? theme.text_secondary : c0, 1.5f);
+        chart_geom::FillDot(painter, src[hi], 3.6f, mono_ ? theme.text : c0);
     }
     wchar_t v0[16], v1[16];
     chart_geom::FormatValue(ys[hi], v0, 16);
@@ -584,13 +604,12 @@ void Chart::DrawCartesianHover(Painter& painter, const Theme& theme, const Rect&
     const Rect host{absolute_.x, absolute_.y, absolute_.w, absolute_.h};
     if (vis0 && vis1) {
         chart_geom::FormatValue(bys[hi], v1, 16);
-        chart_geom::DrawCallout(painter, theme, anchor, host, title, b_name, v1, theme.text_secondary,
-                                a_name, v0, theme.text);
+        chart_geom::DrawCallout(painter, theme, anchor, host, title, b_name, v1, c1, a_name, v0, c0);
     } else if (vis0) {
-        chart_geom::DrawCallout(painter, theme, anchor, host, title, a_name, v0, theme.text);
+        chart_geom::DrawCallout(painter, theme, anchor, host, title, a_name, v0, c0);
     } else {
         chart_geom::FormatValue(bys[hi], v1, 16);
-        chart_geom::DrawCallout(painter, theme, anchor, host, title, b_name, v1, theme.text_secondary);
+        chart_geom::DrawCallout(painter, theme, anchor, host, title, b_name, v1, c1);
     }
 }
 
@@ -628,6 +647,8 @@ void Chart::Draw(Painter& painter, const Theme& theme) {
         const size_t sn = chart_geom::ExpandSpline(src, n, spline);
 
         const bool has_b = baseline_count_ > 0;
+        const Color c0 = SeriesInk(theme, 0, 2);
+        const Color c1 = SeriesInk(theme, 1, 2);
         Point bsrc[kMax]{};
         Point bspline[kSplineMax];
         size_t bsn = 0;
@@ -638,16 +659,26 @@ void Chart::Draw(Painter& painter, const Theme& theme) {
                 bsrc[i] = chart_geom::MapX(box, i, n, bys[i], mn, mx);
             }
             bsn = chart_geom::ExpandSpline(bsrc, n, bspline);
-            painter.StrokeOpenPolyline(bspline, static_cast<int>(bsn), theme.text_secondary, 1.2f,
-                                       true);
+            painter.StrokeOpenPolyline(bspline, static_cast<int>(bsn), c1, 1.2f, true);
         }
 
         if (SeriesVisible(0)) {
-            if (kind_ == ChartKind::Area) FillArea(painter, spline, sn, box, theme.fill_hover);
-            painter.StrokeOpenPolyline(spline, static_cast<int>(sn), theme.text, has_b ? 2.2f : 1.8f);
-            if (!has_b) DrawPeak(painter, theme, spline, sn, ys, n);
+            if (kind_ == ChartKind::Area) {
+                FillArea(painter, spline, sn, box, mono_ ? theme.fill_hover : WithAlpha(c0, 0.16f));
+            }
+            // 类别色主线下垫一条同色宽描边作柔光，强度随 glow_intensity。
+            const float halo_a = 0.26f * theme.glow_intensity;
+            if (!mono_ && halo_a > 0.004f) {
+                painter.StrokeOpenPolyline(spline, static_cast<int>(sn), WithAlpha(c0, halo_a),
+                                           has_b ? 7.0f : 6.0f);
+            }
+            painter.StrokeOpenPolyline(spline, static_cast<int>(sn), c0, has_b ? 2.2f : 1.8f);
+            if (!has_b) {
+                DrawPeak(painter, mono_ ? theme.glow_sm : WithAlpha(c0, theme.glow_sm.a), spline,
+                         sn, ys, n);
+            }
             for (size_t i = 0; i < n; ++i) {
-                chart_geom::FillDot(painter, src[i], 2.6f, theme.text);
+                chart_geom::FillDot(painter, src[i], 2.6f, c0);
             }
         }
 
@@ -673,6 +704,10 @@ void Chart::Draw(Painter& painter, const Theme& theme) {
         const bool horiz = bar_ == ChartBar::Horizontal;
         const float span = std::max(1.0e-6f, mx - std::min(0.0f, mn));
         const bool vis0 = SeriesVisible(0);
+        const Color c0 = SeriesInk(theme, 0, 1);
+        const Color bar_rest = mono_ ? theme.text_secondary : WithAlpha(c0, 0.62f);
+        const Color bar_hot = mono_ ? theme.text : c0;
+        const Color bar_glow = WithAlpha(c0, theme.glow_sm.a * 0.8f);
         size_t hi = static_cast<size_t>(-1);
         if (hovered_ && n > 0) {
             if (horiz) {
@@ -690,7 +725,10 @@ void Chart::Draw(Painter& painter, const Theme& theme) {
                     const float t = Clamp(ys[i] / span, 0.0f, 1.0f);
                     const float bw = std::max(4.0f, t * box.w);
                     const float y = box.y + slot * static_cast<float>(i) + (slot - bh) * 0.5f;
-                    const Color fill = (i == hi) ? theme.text : theme.text_secondary;
+                    const Color fill = (i == hi) ? bar_hot : bar_rest;
+                    if (i == hi && !mono_ && bar_glow.a > 0.004f) {
+                        painter.DrawGlow({box.x, y, bw, bh}, bh * 0.5f, bar_glow, 0.8f);
+                    }
                     painter.FillRoundedRect({box.x, y, bw, bh}, bh * 0.5f, fill);
                 }
             } else {
@@ -700,7 +738,11 @@ void Chart::Draw(Painter& painter, const Theme& theme) {
                     const float t = Clamp((ys[i] - mn) / std::max(1.0e-6f, mx - mn), 0.0f, 1.0f);
                     const float h = std::max(4.0f, t * box.h);
                     const float px = box.x + slot * static_cast<float>(i) + (slot - bw) * 0.5f;
-                    const Color fill = (i == hi) ? theme.text : theme.text_secondary;
+                    const Color fill = (i == hi) ? bar_hot : bar_rest;
+                    if (i == hi && !mono_ && bar_glow.a > 0.004f) {
+                        painter.DrawGlow({px, box.Bottom() - h, bw, h}, std::min(bw, h) * 0.5f,
+                                         bar_glow, 0.8f);
+                    }
                     painter.FillRoundedRect({px, box.Bottom() - h, bw, h}, std::min(bw, h) * 0.5f,
                                             fill);
                 }
@@ -738,7 +780,7 @@ void Chart::Draw(Painter& painter, const Theme& theme) {
             const std::wstring_view a_name =
                 series_name_.empty() ? std::wstring_view(L"Value") : series_name_;
             const Rect host{absolute_.x, absolute_.y, absolute_.w, absolute_.h};
-            chart_geom::DrawCallout(painter, theme, anchor, host, title, a_name, buf, theme.text);
+            chart_geom::DrawCallout(painter, theme, anchor, host, title, a_name, buf, bar_hot);
         }
         break;
     }
@@ -769,11 +811,8 @@ void Chart::Draw(Painter& painter, const Theme& theme) {
             const float frac = std::max(0.0f, slices_[i].value) / sum;
             const float sweep = frac * 360.0f - kGap;
             if (sweep > 0.5f) {
-                const float t = slice_count_ <= 1
-                                    ? 1.0f
-                                    : 1.0f - static_cast<float>(i) / static_cast<float>(slice_count_ - 1);
-                painter.DrawArc(c, radius, ang + kGap * 0.5f, sweep, chart_geom::Tone(theme, t),
-                                14.0f);
+                painter.DrawArc(c, radius, ang + kGap * 0.5f, sweep,
+                                SeriesInk(theme, i, slice_count_), 14.0f);
             }
             ang += frac * 360.0f;
         }
@@ -783,13 +822,10 @@ void Chart::Draw(Painter& painter, const Theme& theme) {
                          theme.text, Align::Center);
         float ly = box.y + 4.0f;
         for (size_t i = 0; i < slice_count_; ++i) {
-            const float t = slice_count_ <= 1
-                                ? 1.0f
-                                : 1.0f - static_cast<float>(i) / static_cast<float>(slice_count_ - 1);
             const bool on = SeriesVisible(i);
             const Color ink = on ? theme.text : theme.text_disabled;
             painter.FillRoundedRect({box.Right() - 96.0f, ly + 4.0f, 8.0f, 8.0f}, 4.0f,
-                                    on ? chart_geom::Tone(theme, t) : theme.text_disabled);
+                                    on ? SeriesInk(theme, i, slice_count_) : theme.text_disabled);
             painter.DrawText(slices_[i].label, {box.Right() - 84.0f, ly, 80.0f, 16.0f},
                              TextRole::Caption, ink, Align::Leading, 80.0f);
             if (!on) {
@@ -843,7 +879,9 @@ void Chart::Draw(Painter& painter, const Theme& theme) {
                 const float t = (v - mn) / (mx - mn);
                 const Rect r{box.x + static_cast<float>(x_i) * (cell + gap),
                              box.y + static_cast<float>(y_i) * (cell + gap), cell, cell};
-                painter.FillRoundedRect(r, rad, chart_geom::Heat(theme, t));
+                const Color heat = mono_ ? chart_geom::Heat(theme, t)
+                                         : Mix(chart_geom::Heat(theme, 0.0f), SeriesInk(theme, 0, 1), t);
+                painter.FillRoundedRect(r, rad, heat);
             }
         }
         if (hx < grid_cols_ && hy < grid_rows_) {
@@ -891,11 +929,17 @@ void Chart::Draw(Painter& painter, const Theme& theme) {
 
         Point poly[9];
         for (size_t i = 0; i < n; ++i) poly[i] = vertex(i, unit(ys[i]));
+        const Color c0 = SeriesInk(theme, 0, 1);
         for (size_t i = 1; i + 1 < n; ++i) {
-            painter.FillTriangle(poly[0], poly[i], poly[i + 1], theme.fill_selected);
+            painter.FillTriangle(poly[0], poly[i], poly[i + 1],
+                                 mono_ ? theme.fill_selected : WithAlpha(c0, 0.18f));
         }
         poly[n] = poly[0];
-        painter.StrokeOpenPolyline(poly, static_cast<int>(n + 1), theme.text, 2.2f);
+        const float halo_a = 0.26f * theme.glow_intensity;
+        if (!mono_ && halo_a > 0.004f) {
+            painter.StrokeOpenPolyline(poly, static_cast<int>(n + 1), WithAlpha(c0, halo_a), 7.0f);
+        }
+        painter.StrokeOpenPolyline(poly, static_cast<int>(n + 1), c0, 2.2f);
 
         for (size_t i = 0; i < n; ++i) {
             const float a = -kPi * 0.5f + kPi * 2.0f * static_cast<float>(i) / static_cast<float>(n);
@@ -939,15 +983,15 @@ void Chart::Draw(Painter& painter, const Theme& theme) {
                     }
                 }
                 if (best <= kPi / static_cast<float>(n) + 0.12f) {
-                    painter.DrawLine(c, poly[hi], theme.text, 1.0f);
-                    chart_geom::FillDot(painter, poly[hi], 6.0f, theme.text);
+                    painter.DrawLine(c, poly[hi], c0, 1.0f);
+                    chart_geom::FillDot(painter, poly[hi], 6.0f, c0);
                     wchar_t val[16];
                     std::swprintf(val, 16, L"%d", chart_geom::AsPercent(ys[hi]));
                     std::wstring_view title = L"Axis";
                     if (const std::wstring* lab = LabelAt(hi, n)) title = *lab;
                     const Rect host{absolute_.x, absolute_.y, absolute_.w, absolute_.h};
                     chart_geom::DrawCallout(painter, theme, poly[hi], host, title, L"Metric", val,
-                                            theme.text);
+                                            c0);
                 }
             }
         }
@@ -977,7 +1021,9 @@ void Chart::Draw(Painter& painter, const Theme& theme) {
             const float shade =
                 n <= 1 ? 1.0f
                        : 1.0f - 0.78f * static_cast<float>(i) / static_cast<float>(n - 1);
-            const Color fill = chart_geom::Tone(theme, shade);
+            const Color fill = mono_ ? chart_geom::Tone(theme, shade)
+                                     : Mix(chart_geom::Heat(theme, 0.0f), SeriesInk(theme, 0, 1),
+                                           0.30f + 0.70f * shade);
             const Color hi{std::min(1.0f, fill.r + 0.10f), std::min(1.0f, fill.g + 0.10f),
                            std::min(1.0f, fill.b + 0.10f), 1.0f};
             const Rect bar{px, y, bw, bh};
@@ -1025,7 +1071,7 @@ void Chart::Draw(Painter& painter, const Theme& theme) {
                                     theme.fill_input_pressed);
             const float actual = Clamp(ys[i] > 1.001f ? ys[i] / 100.0f : ys[i], 0.0f, 1.0f);
             painter.FillRoundedRect({txx, ty, std::max(8.0f, track_w * actual), track_h},
-                                    track_h * 0.5f, theme.text);
+                                    track_h * 0.5f, SeriesInk(theme, 0, 1));
             if (i < target_count_) {
                 const float tg = Clamp(tgt > 1.001f ? tgt / 100.0f : tgt, 0.0f, 1.0f);
                 const float mxpos = txx + track_w * tg;

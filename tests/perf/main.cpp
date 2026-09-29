@@ -43,6 +43,73 @@ struct BenchTable : Table { using Table::Measure; using Table::Arrange; using Ta
 
 struct BenchLog : LogView { using LogView::Arrange; using LogView::Prepare; using LogView::Draw; };
 
+// 程序化着色器：GPU 完成耗时（EndDraw + Finish），对照同尺寸纯色填充；另测暖帧 C++ 分配。
+bool ShaderBench(OffscreenRenderer& renderer, Painter& painter) {
+    constexpr int kFrames = 120;
+    struct Case {
+        const char* name;
+        ShaderKind kind;
+        bool shader;
+    };
+    const Case cases[] = {{"fill", ShaderKind::Mist, false},  {"mist", ShaderKind::Mist, true},
+                          {"glow", ShaderKind::Glow, true},   {"dotgrid", ShaderKind::DotGrid, true},
+                          {"rays", ShaderKind::Rays, true},   {"flow", ShaderKind::Flow, true},
+                          {"liquid", ShaderKind::Liquid, true}};
+    const Rect sizes[] = {{0, 0, 1280, 800}, {40, 40, 480, 200}};
+    const char* size_name[] = {"1280x800", "480x200"};
+    bool pass = true;
+    if (!renderer.EndDraw()) return false;   // 进入时处于绘制中（上一基准末尾已 BeginDraw）
+    for (int s = 0; s < 2; ++s) {
+        double baseline = 0.0;
+        for (const Case& c : cases) {
+            std::vector<double> ms;
+            ms.reserve(kFrames);
+            size_t allocations = 0;
+            bool drawn = true;
+            ShaderParams params;
+            params.kind = c.kind;
+            params.intensity = 0.8f;
+            params.grain = 0.25f;
+            for (int frame = -10; frame < kFrames; ++frame) {
+                params.time = static_cast<float>(frame + 10) / 30.0f;
+                const auto start = std::chrono::steady_clock::now();
+                painter.BeginFrame(renderer.BeginDraw(), &UiText(), 1.0f);
+                painter.FillRect({0, 0, 1280, 800}, {0, 0, 0, 1});
+                allocation_probe::count = allocation_probe::bytes = 0;
+                allocation_probe::enabled = frame >= 0;
+                if (c.shader) drawn = painter.DrawShader(sizes[s], params) && drawn;
+                else painter.FillRect(sizes[s], {1, 1, 1, 0.1f});
+                allocation_probe::enabled = false;
+                painter.EndFrame();
+                if (!renderer.EndDraw() || !renderer.Finish()) return false;
+                const auto end = std::chrono::steady_clock::now();
+                if (frame >= 0) {
+                    allocations += allocation_probe::count;
+                    ms.push_back(std::chrono::duration<double, std::milli>(end - start).count());
+                }
+            }
+            std::sort(ms.begin(), ms.end());
+            double total = 0.0;
+            for (double v : ms) total += v;
+            const double avg = total / kFrames;
+            if (!c.shader) baseline = avg;
+            std::printf("shader %-7s %s GPU-complete frame avg=%.3f p50=%.3f p95=%.3f ms (+%.3f vs fill) allocations=%zu\n",
+                        c.name, size_name[s], avg, ms[kFrames / 2],
+                        ms[static_cast<size_t>(0.95 * (kFrames - 1))], c.shader ? avg - baseline : 0.0,
+                        allocations);
+            if (!drawn) {
+                std::printf("[FAIL] shader %s effect unavailable\n", c.name);
+                pass = false;
+            }
+            if (allocations != 0) pass = false;
+        }
+    }
+    std::printf("[%s] shader draw available + warm C++ allocation boundary (timings informational)\n",
+                pass ? "PASS" : "FAIL");
+    painter.BeginFrame(renderer.BeginDraw(), &UiText(), 1.0f);
+    return pass;
+}
+
 bool TriangleBench(OffscreenRenderer& renderer, Painter& painter) {
     constexpr int kFrames = 120, kTriangles = 256;
     const Color ink{1.0f, 1.0f, 1.0f, 0.25f};
@@ -316,6 +383,7 @@ int main() {
 #endif
     const bool triangle_pass = TriangleBench(renderer, painter);
     const bool polyline_pass = PolylineBench(renderer, painter);
+    const bool shader_pass = ShaderBench(renderer, painter);
     renderer.Shutdown();
     const double avg = Mean(frame_ms);
     double worst = 0.0;
@@ -335,7 +403,7 @@ int main() {
     std::printf("场景：1280x800，8 按钮 + 100,000 行虚拟列表 + 聚光卡 + Area/Heatmap，全帧重绘 %d 帧\n",
                 kFrames);
     std::printf("平均 %.3f ms/帧，最差 %.3f ms/帧\n", avg, worst);
-    const bool pass = avg < 8.0 && table_pass && triangle_pass && polyline_pass;
+    const bool pass = avg < 8.0 && table_pass && triangle_pass && polyline_pass && shader_pass;
     std::printf("%s perf_frame_budget (< 8 ms)\n", pass ? "[PASS]" : "[FAIL]");
     CoUninitialize();
     return pass ? 0 : 1;

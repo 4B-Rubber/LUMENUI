@@ -159,6 +159,7 @@ int main() {
     LUMEN_CHAIN(lumen::ImageView);
     LUMEN_CHAIN(lumen::Skeleton);
     LUMEN_CHAIN(lumen::Separator);
+    LUMEN_CHAIN(lumen::ShaderView);
     LUMEN_CHAIN(lumen::Expander);
     LUMEN_CHAIN(lumen::SettingsCard);
     LUMEN_CHAIN(lumen::InfoBar);
@@ -307,6 +308,30 @@ int main() {
         filtered.Where({});
         sorted.OrderBy({});
         Check(sorted.Count() == 0, "detached decorators remain safely reusable");
+    }
+
+    // —— 窗口背景着色层：参数钳制、开关往返、带活动背景层关闭窗口 ——
+    {
+        lumen::App app;
+        lumen::Window window(L"lumen backdrop", {320.0f, 240.0f}, lumen::Frame::System);
+        lumen::ShaderBackdrop fx;
+        fx.enabled = true;
+        fx.kind = lumen::ShaderKind::Liquid;
+        fx.max_fps = 500.0f;
+        fx.resolution = 0.01f;
+        fx.intensity = 3.0f;
+        window.BackdropShader(fx);
+        const lumen::ShaderBackdrop got = window.BackdropShader();
+        Check(got.enabled && got.kind == lumen::ShaderKind::Liquid, "backdrop shader round-trips kind");
+        Check(got.max_fps == 60.0f && got.resolution == 0.25f && got.intensity == 1.0f,
+              "backdrop shader clamps parameters");
+        fx.enabled = false;
+        window.BackdropShader(fx);
+        Check(!window.BackdropShader().enabled, "backdrop shader disables");
+        window.BackdropShader(got);
+        window.Close();
+        PumpOnce();
+        Check(window.Post([] {}) == lumen::PostResult::Closed, "window with live backdrop layer closes");
     }
 
     // —— R02：Post 结果协议（真实窗口，不 Show、不泵消息）——
@@ -731,3 +756,20 @@ int main() {
     }
     return 0;
 }
+
+static_assert(requires(lumen::Window& window) { window.Show(false); });
+static_assert(requires(lumen::TextBox& field) { field.ImeEnabled(false).ImeEnabled(); });
+static_assert(static_cast<int>(lumen::CursorShape::SizeNS) == 4);
+static_assert(lumen::CursorShape::SizeNWSE != lumen::CursorShape::SizeNESW);
+
+static_assert(requires(lumen::TextBox& field, lumen::TextTypography type) {
+    field.Multiline(true).Typography(type).WordWrap(true).Chrome(false).ContentPadding(2.0f)
+        .Foreground(lumen::Color::Hex(0x202020)).TextBackdrop(lumen::Color::Hex(0xffffff))
+        .SelectionFill(lumen::Color::Hex(0xaaaaaa));
+    field.ContentSize(220.0f); field.CaretBounds(); field.PlaceCaret({0.0f, 0.0f});
+});
+
+static_assert(requires(lumen::ListView& list) {
+    list.ItemSecondaryText([](size_t, std::wstring& text) { text = L"Ready"; }).ItemTextRole(lumen::TextRole::Body);
+    list.RefreshItems();
+});

@@ -116,11 +116,13 @@ void DropDownButton::Draw(Painter& painter, const Theme& theme) {
     case ButtonKind::Primary:
     case ButtonKind::Danger:
         if (enabled_) {
-            fill = pressed_ ? theme.accent_pressed
-                            : (kind_ == ButtonKind::Danger ? theme.danger : theme.accent);
-            foreground = kind_ == ButtonKind::Danger
-                             ? theme.accent_text
-                             : (pressed_ ? theme.primary_text_pressed : theme.primary_text);
+            if (kind_ == ButtonKind::Danger) {
+                fill = pressed_ ? theme.danger_pressed : theme.danger;
+                foreground = theme.danger_text;
+            } else {
+                fill = pressed_ ? theme.accent_pressed : theme.accent;
+                foreground = pressed_ ? theme.primary_text_pressed : theme.primary_text;
+            }
             rest_glow = 0.30f;
             hover_glow = 0.60f;
             glow_spread = Lerp(1.0f, 1.75f, glow_t_);
@@ -161,13 +163,13 @@ void DropDownButton::Draw(Painter& painter, const Theme& theme) {
     }
 
     const float glow_a = Lerp(rest_glow, hover_glow, glow_t_) * theme.glow_intensity;
+    // Danger 实心底的辉光取同色 RGB，强度仍沿用 glow token。
+    const Color glow_rgb = kind_ == ButtonKind::Danger && enabled_ ? theme.danger : theme.glow_sm;
     if (glow_a > 0.004f) {
-        painter.DrawGlow(r, radius,
-                         Color{theme.glow_sm.r, theme.glow_sm.g, theme.glow_sm.b, glow_a},
-                         glow_spread);
+        painter.DrawGlow(r, radius, Color{glow_rgb.r, glow_rgb.g, glow_rgb.b, glow_a}, glow_spread);
     }
     if (focused_ && enabled_) {
-        painter.DrawGlow(r, radius, Color{theme.glow_sm.r, theme.glow_sm.g, theme.glow_sm.b,
+        painter.DrawGlow(r, radius, Color{glow_rgb.r, glow_rgb.g, glow_rgb.b,
                                           theme.glow_sm.a * 0.7f});
     }
     if (fill.a > 0.0f) painter.FillRoundedRect(r, radius, fill);

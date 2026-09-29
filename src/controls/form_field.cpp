@@ -229,11 +229,13 @@ void FormField::Arrange(const Rect& absolute) {
     absolute_ = absolute;
     float y = body_left_ > 0.0f ? 0.0f : header_h_;
     bool first = true;
+    input_box_ = {};
     for (size_t i = 0; i < children_.size(); ++i) {
         if (!ChildVisible(i)) continue;
         if (!first) y += kGapChild;
-        first = false;
         const Size desired = ChildDesired(i);
+        if (first) input_box_ = {absolute.x + body_left_, absolute.y + y, absolute.w - body_left_, desired.h};
+        first = false;
         SetChildBounds(Child(i), {body_left_, y, absolute.w - body_left_, desired.h});
         ArrangeChildAt(i);
         y += desired.h;
@@ -241,6 +243,15 @@ void FormField::Arrange(const Rect& absolute) {
 }
 
 void FormField::Draw(Painter& painter, const Theme& theme) {
+    // 错误态：输入控件外沿一圈 danger 同色柔光（先于子级绘制，只露出外沿）；
+    // 强度沿用 glow token，随 glow_intensity。错误文字仍是主提示。
+    if (!error_.empty() && enabled_ && !input_box_.IsEmpty()) {
+        const float a = theme.glow_sm.a * 0.9f;
+        if (a > 0.004f) {
+            painter.DrawGlow(input_box_, theme.radius_control,
+                             Color{theme.danger.r, theme.danger.g, theme.danger.b, a}, 0.7f, true);
+        }
+    }
     float y = absolute_.y;
     const Color fg = enabled_ ? theme.text : theme.text_disabled;
     if (!label_.empty() || required_) {

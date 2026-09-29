@@ -6,6 +6,7 @@
 #include "ControlOf.h"
 #include "Command.h"
 #include "Signal.h"
+#include "Theme.h"
 #include <functional>
 #include <memory>
 #include <optional>
@@ -16,7 +17,7 @@ namespace lumen {
 class ToolTip;
 
 // Primary = 白底黑字 + 外发光，悬停增辉；Standard = 黑底 20% 描边，悬停描边转白+外发光；
-// Subtle/Transparent = 幽灵；Danger = 白热警示。Shimmer(true) 叠加锥形流光边框。
+// Subtle/Transparent = 幽灵；Danger = theme.danger 红色实心 + 同色辉光。Shimmer(true) 叠加锥形流光边框。
 // 悬停不做位移（发光体不是实体键），按压中心轻微收缩。
 enum class ButtonKind { Standard, Primary, Subtle, Transparent, Danger };
 
@@ -64,6 +65,15 @@ public:
     // 流光边框：静止时半透明锥形环，悬停/聚焦期间旋转（4s 一圈）。
     Button& Shimmer(bool value) { shimmer_ = value; Invalidate(); return *this; }
     bool Shimmer() const noexcept { return shimmer_; }
+    // 瞬时状态光：按 StatusColor(tone) 闪一次同色外发光 + 描边，约 1 s 内淡出，用于保存成功/
+    // 失败等一次性反馈。只是附加提示，仍需文字/Toast 说明结果；motion_scale=0 时不闪。
+    Button& Flash(StatusTone tone) {
+        flash_tone_ = tone;
+        flash_t_ = 1.0f;
+        Animate();
+        return *this;
+    }
+    float FlashLevel() const noexcept { return flash_t_; }
 
     Button& OnClick(std::function<void()> handler) {
         click_.Subscribe(std::move(handler));
@@ -115,6 +125,8 @@ protected:
     float scale_t_ = 0.0f;       // 按压缩放 0..1
     float shimmer_angle_ = 0.0f; // 流光相位（弧度）
     float bloom_t_ = 0.0f;       // 按压光爆 1→0
+    float flash_t_ = 0.0f;       // 状态闪光 1→0
+    StatusTone flash_tone_ = StatusTone::Success;
     Point bloom_at_{};
     Signal<> click_;
     Command* command_ = nullptr;

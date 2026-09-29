@@ -62,6 +62,31 @@ void BuildButtons(lumen::StackPanel& column, lumen::Window& window) {
             ShowPage(L"status");
         });
 
+    auto& flash = Sample(column, L"Button::Flash",
+                         L"One-shot status light: a same-colour glow + edge that fades in about a second. "
+                         L"Pair it with text or a Toast; colour is only the extra cue.");
+    auto& flash_row = flash.Add<Row>().Spacing(8.0f).AlignCross(Cross::Center);
+    auto& flash_save = flash_row.Add<Button>(L"Save", ButtonKind::Primary);
+    flash_save.OnClick([&window, &flash_save] {
+        flash_save.Flash(StatusTone::Success);
+        window.ShowToast(L"Saved", ToastKind::Success);
+    });
+    auto& flash_sync = flash_row.Add<Button>(L"Sync (offline)");
+    flash_sync.OnClick([&window, &flash_sync] {
+        flash_sync.Flash(StatusTone::Warning);
+        window.ShowToast(L"Queued until online", ToastKind::Warning);
+    });
+    auto& flash_fail = flash_row.Add<Button>(L"Publish (fails)");
+    flash_fail.OnClick([&window, &flash_fail] {
+        flash_fail.Flash(StatusTone::Danger);
+        window.ShowToast(L"Publish failed", ToastKind::Error);
+    });
+    auto& flash_info = flash_row.Add<Button>(L"Check updates", ButtonKind::Subtle);
+    flash_info.OnClick([&window, &flash_info] {
+        flash_info.Flash(StatusTone::Info);
+        window.ShowToast(L"Up to date", ToastKind::Info);
+    });
+
     auto& toggles = Sample(column, L"ToggleButton", L"Sticky; independent of SplitButton.");
     auto& toggle_row = toggles.Add<Row>().Spacing(8.0f).AlignCross(Cross::Center);
     auto& bold = toggle_row.Add<ToggleButton>(L"Bold");

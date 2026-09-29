@@ -86,7 +86,7 @@ void MenuWindow::ComputeLayout() {
         if (item.separator) continue;
         if (!item.glyph.empty() || item.checked || item.checkable || item.radio) any_gutter_ = true;
         const std::wstring label = MenuLabel(item.text);
-        max_text_w = std::max(max_text_w, MeasureUiText(label, TextRole::Body, 0.0f, luma).w);
+        max_text_w = std::max(max_text_w, MeasureUiText(label, item.header ? TextRole::BodyStrong : TextRole::Body, 0.0f, luma).w);
         if (!item.shortcut.empty()) {
             any_shortcut = true;
             max_shortcut_w = std::max(max_shortcut_w,
@@ -819,7 +819,7 @@ void MenuWindow::Paint() {
         if (item.header) {
             DrawAccessLabel(painter, item.text,
                             {text_x, cursor, width_dip_ - text_x - kItemRightPad, row_h},
-                            TextRole::CaptionStrong, Fade(theme_.text_secondary, opacity),
+                            TextRole::BodyStrong, Fade(theme_.text_secondary, opacity),
                             Align::Leading, luma);
             cursor += row_h;
             continue;

@@ -6,6 +6,7 @@
 #pragma once
 #include "Core.h"
 #include "Theme.h"
+#include "Shader.h"
 #include <windows.h>
 #include "win_undef.h"
 #include <cstdint>
@@ -63,6 +64,8 @@ public:
     // LumaText 渲染桥（可空 = 纯 DirectWrite）与文字底色（用于 gamma/明暗判定）。
     void SetLumaText(LumaTextBridge* luma) noexcept { luma_ = luma; }
     void SetBackdrop(Color backdrop) noexcept { backdrop_ = backdrop; }
+    // 当前文字底色估计（LumaText 按明暗选择覆盖率曲线）；自绘段落传给 TextLayout::Draw。
+    Color Backdrop() const noexcept { return backdrop_; }
 
     void FillRect(const Rect& r, Color color);
     // 横向三停渐变（透明→color→透明）：顶缘镜面高光等需要两端渐隐的细条。
@@ -195,6 +198,11 @@ public:
 
     float Scale() const noexcept { return scale_; }
 
+    // GPU 程序化着色：在 r（DIP）内按设备像素逐点求值，SourceOver 合成。
+    // 轴对齐变换下按整像素对齐绘制（不经缩放重采样）。设备不支持时返回 false，不绘制。
+    // 每帧仅更新常量，零堆分配；效果对象随设备重建。
+    bool DrawShader(const Rect& r, const ShaderParams& params);
+
     // 蓝噪声平铺：压在渐变/辉光上打碎 8bit 色带。绘制路径零堆。
     void OverlayDither(const Rect& r);
 
@@ -206,6 +214,7 @@ public:
     void DrawAcrylic(const Rect& r, float sigma, float dim);
 
 private:
+    friend class TextLayout;
     ID2D1SolidColorBrush* Brush(Color color);
     ID2D1StrokeStyle* RoundStroke();
     ID2D1StrokeStyle* DashStroke();
@@ -275,6 +284,8 @@ private:
     ID2D1Bitmap1* acrylic_blurred_ = nullptr;
     ID2D1Effect* acrylic_blur_ = nullptr;
     ID2D1Effect* acrylic_sat_ = nullptr;
+    ID2D1Effect* shader_effect_ = nullptr;
+    bool shader_failed_ = false;   // 本设备创建失败后不再每帧重试
     bool acrylic_captured_ = false;
     bool acrylic_output_dirty_ = true;
     float acrylic_sigma_px_ = -1.0f;

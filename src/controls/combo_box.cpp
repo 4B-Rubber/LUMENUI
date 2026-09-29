@@ -74,6 +74,12 @@ public:
     using TextBox::OnImeEnd;
     using TextBox::ImeCaret;
 protected:
+    bool PaintChrome() const noexcept override { return false; }
+    void OnFocusChanged(bool focused) override {
+        TextBox::OnFocusChanged(focused);
+        owner_->Animate();
+        owner_->Invalidate();
+    }
     bool OnKey(uint32_t key) override {
         if (key == VK_DOWN || key == VK_F4) { owner_->OpenPopup(); return true; }
         if (key == VK_RETURN) { owner_->CommitText(); return true; }
@@ -141,6 +147,10 @@ public:
     }
 
     size_t MatchCount() const noexcept { return matches_.size(); }
+    float NaturalHeight() const noexcept {
+        return kPopupPad * 2.0f + std::max(kRowHeight,
+            std::min(content_h_, static_cast<float>(owner_->max_dropdown_rows_) * kRowHeight));
+    }
 
     void FocusDataIndex(size_t data) {
         for (size_t i = 0; i < rows_.size(); ++i) {
@@ -157,7 +167,7 @@ protected:
     Size Measure(Size available, const Theme&) override {
         const float cap = static_cast<float>(owner_->max_dropdown_rows_) * kRowHeight;
         const float view = std::min(content_h_, cap);
-        return {available.w, kPopupPad * 2.0f + std::max(kRowHeight, view)};
+        return {Bounded(available.w) ? available.w : 240.0f, kPopupPad * 2.0f + std::max(kRowHeight, view)};
     }
     bool Focusable() const noexcept override { return true; }
     void Arrange(const Rect& absolute) override {
@@ -220,6 +230,24 @@ protected:
 
     bool OnKey(uint32_t vk) override {
         if (vk == VK_ESCAPE) { owner_->CloseDropdown(); return true; }
+        if (vk == VK_TAB) {
+            // A detached popup must not trap Tab in its single list control.
+            // Defer traversal until the popup has restored the anchor's focus.
+            WeakRef<ComboBox> owner(owner_);
+            const bool backwards = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+            Commit();
+            if (owner) {
+                owner->CloseDropdown();
+                if (auto* window = owner->WindowOf()) window->Post([weak = std::make_shared<WeakRef<ComboBox>>(owner.Get()), backwards] {
+                    auto* combo = weak->Get();
+                    if (!combo || !combo->WindowOf()) return;
+                    if (combo->Editable() && !backwards) combo->Editor().Focus();
+                    else combo->Focus();
+                    combo->WindowOf()->FocusNext(backwards);
+                });
+            }
+            return true;
+        }
         if (vk == VK_RETURN || (vk == VK_SPACE && !owner_->editable_)) { Commit(); return true; }
         if (owner_->editable_ && (vk == VK_HOME || vk == VK_END)) return owner_->EditKey(vk);
         if (vk == VK_UP || vk == VK_DOWN || vk == VK_HOME || vk == VK_END ||
@@ -250,6 +278,9 @@ protected:
         return true;
     }
 
+    bool ImeEnabled() const noexcept override {
+        return !owner_->editor_ || owner_->editor_->ImeEnabled();
+    }
     bool ImeInline() const noexcept override { return owner_->editable_; }
     bool ImeComposing() const noexcept override { return owner_->editor_ && owner_->editor_->Composing(); }
     bool ImeCaret(Point& point, float& height) const override {
@@ -853,19 +884,33 @@ void ComboBox::OnMouseUp(Point local, uint32_t) {
 void ComboBox::OpenPopup(bool from_typing) {
     if (items_.empty() || !window_) return;
     popup_->Rebuild(editable_ && from_typing);
-    if (popup_->MatchCount() == 0 || dropdown_open_) return;
+    if (popup_->MatchCount() == 0) { CloseDropdown(); return; }
+    if (dropdown_open_) return;
     dropdown_open_ = true;
     Animate();
     Invalidate();
-    if (WindowImpl::TransientContains(window_, this)) {
+    RECT client{};
+    GetClientRect(WindowImpl::HwndOf(window_), &client);
+    const float client_height = static_cast<float>(client.bottom) / WindowImpl::ScaleOf(window_);
+    // Match LayoutFlyout's 8 DIP edge inset and 6 DIP anchor gap.
+    const float room = std::max(absolute_.y - 14.0f, client_height - absolute_.Bottom() - 14.0f);
+    if (WindowImpl::TransientContains(window_, this) || popup_->NaturalHeight() > room) {
         native_dropdown_ = true;
-        WeakRef<ComboBox> self(this);
-        window_->ShowPopup(*popup_, this, absolute_.w, [&self] {
-            if (auto* combo = self.Get()) {
-                combo->native_dropdown_ = false;
-                combo->dropdown_open_ = false;
-                combo->Animate();
-                combo->Invalidate();
+        auto self = std::make_shared<WeakRef<ComboBox>>(this);
+        // Keep OpenPopup/UIA Expand non-blocking, even though ShowPopup borrows
+        // its content until dismissal. A collapse before the posted open is safe.
+        window_->Post([self] {
+            auto* combo = self->Get();
+            if (!combo || !combo->dropdown_open_ || !combo->native_dropdown_) return;
+            auto* window = combo->WindowOf();
+            if (window && combo->Enabled() && combo->Visible() && !window->PopupActive()) {
+                window->ShowPopup(*combo->popup_, combo, combo->AbsoluteBounds().w);
+            }
+            if (auto* live = self->Get()) {
+                live->native_dropdown_ = false;
+                live->dropdown_open_ = false;
+                live->Animate();
+                live->Invalidate();
             }
         });
         return;
@@ -876,7 +921,13 @@ void ComboBox::OpenPopup(bool from_typing) {
 
 void ComboBox::CloseDropdown() {
     if (!window_ || !dropdown_open_) return;
-    if (native_dropdown_) window_->ClosePopup();
+    if (native_dropdown_) {
+        native_dropdown_ = false;
+        dropdown_open_ = false;
+        window_->ClosePopup();
+        Animate();
+        Invalidate();
+    }
     else if (WindowImpl::TransientActive(window_, popup_.get())) WindowImpl::CloseTransient(window_);
 }
 
@@ -951,7 +1002,7 @@ bool ComboBox::OnKey(uint32_t vk) {
 }
 
 bool ComboBox::OnAnimate(float dt) {
-    const bool lit = enabled_ && (hovered_ || focused_ || dropdown_open_);
+    const bool lit = enabled_ && (hovered_ || focused_ || dropdown_open_ || (editor_ && editor_->HasFocus()));
     bool active = Control::OnAnimate(dt);
     active |= EaseTo(glow_t_, lit ? 1.0f : 0.0f, dt, 12.0f);
     active |= EaseTo(chevron_t_, dropdown_open_ ? 1.0f : 0.0f, dt, 12.0f);
@@ -974,11 +1025,12 @@ void ComboBox::Draw(Painter& painter, const Theme& theme) {
     border.a = Lerp(border.a, theme.text_secondary.a, glow_t_);
     Color label = theme.text;
     if (!enabled_) { fill = theme.fill_input_disabled; border = theme.control_stroke; label = theme.text_disabled; }
-    else if (dropdown_open_ || focused_) { fill = theme.fill_input_focus; border = theme.accent; painter.DrawGlow(absolute_, radius, theme.glow_sm); }
+    else if (dropdown_open_ || focused_ || (editor_ && editor_->HasFocus())) { fill = theme.fill_input_focus; border = theme.accent; painter.DrawGlow(absolute_, radius, theme.glow_sm); }
     painter.FillRoundedRect(absolute_, radius, fill);
     painter.DrawInnerLight(absolute_, radius, theme.edge_light, Color{0.0f, 0.0f, 0.0f, 0.35f});
     painter.StrokeRoundedRect(absolute_, radius, border);
-    if (enabled_ && FocusVisible()) PaintFocusRing(painter, theme, absolute_, radius);
+    if (enabled_ && (FocusVisible() || (editor_ && editor_->FocusVisible())))
+        PaintFocusRing(painter, theme, absolute_, radius);
     painter.DrawChevron({absolute_.Right() - kChevronArea * 0.5f, absolute_.y + absolute_.h * 0.5f},
                         16.0f, 180.0f * chevron_t_, enabled_ ? theme.text_secondary : theme.text_disabled, 1.6f);
     if (editable_ || (multi_ && ChildCount() > 0)) return;
@@ -999,7 +1051,15 @@ ComboBox& ComboBox::Text(std::wstring_view value) {
     Invalidate(); return *this;
 }
 void ComboBox::CommitText() {
-    if (!editable_ || committed_text_ == edit_text_) return;
+    if (!editable_) return;
+    // An exact typed value must reopen with its current row highlighted.
+    const auto match = std::find_if(items_.begin(), items_.end(), [this](const std::wstring& item) {
+        return item.size() == edit_text_.size() && StartsFolded(item, edit_text_);
+    });
+    selected_ = match == items_.end() ? -1 : static_cast<ptrdiff_t>(match - items_.begin());
+    RememberSelection();
+    Invalidate();
+    if (committed_text_ == edit_text_) return;
     committed_text_ = edit_text_;
     text_committed_.Emit(committed_text_);
 }

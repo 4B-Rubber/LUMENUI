@@ -301,6 +301,36 @@ private:
 
 namespace {
 
+// 最大化应占的矩形：显示器工作区（让出任务栏）。任务栏自动隐藏时工作区等于整屏，
+// 在其所在边留 1px，否则系统判定窗口全屏、鼠标碰边也唤不出任务栏。
+bool MaximizedWorkArea(HMONITOR monitor, RECT* out) {
+    MONITORINFO mi{};
+    mi.cbSize = sizeof(mi);
+    if (!monitor || !out || !GetMonitorInfoW(monitor, &mi)) return false;
+    RECT work = mi.rcWork;
+    if (EqualRect(&work, &mi.rcMonitor)) {
+        APPBARDATA state{};
+        state.cbSize = sizeof(state);
+        if (SHAppBarMessage(ABM_GETSTATE, &state) & ABS_AUTOHIDE) {
+            const UINT edges[] = {ABE_BOTTOM, ABE_TOP, ABE_LEFT, ABE_RIGHT};
+            for (const UINT edge : edges) {
+                APPBARDATA bar{};
+                bar.cbSize = sizeof(bar);
+                bar.uEdge = edge;
+                bar.rc = mi.rcMonitor;
+                if (!SHAppBarMessage(ABM_GETAUTOHIDEBAREX, &bar)) continue;
+                if (edge == ABE_BOTTOM) work.bottom -= 1;
+                else if (edge == ABE_TOP) work.top += 1;
+                else if (edge == ABE_LEFT) work.left += 1;
+                else work.right -= 1;
+                break;
+            }
+        }
+    }
+    *out = work;
+    return true;
+}
+
 struct TextDropSource : IDropSource {
     NativeObjectLifetime lifetime_;
     STDMETHODIMP QueryInterface(REFIID riid, void** ppv) override { NativeCallbackScope callback;
@@ -465,13 +495,15 @@ UiDispatcher Window::Dispatcher() const {
 WindowImpl* Window::Impl() const noexcept { return impl_.get(); }
 StackPanel& Window::Root() { return impl_->Root(); }
 TitleBar* Window::TitleBar() { return impl_->TitleBarPtr(); }
-void Window::Show() {
+void Window::CaptionVisible(bool visible) { impl_->SetCaptionVisible(visible); }
+bool Window::CaptionVisible() const { return impl_->CaptionShown(); }
+void Window::Show(bool activate) {
     auto port = impl_->port_;
     if (!Visible()) showing_.Emit();
     if (!port->target.load()) return;
     if (fit_pending_) { fit_pending_ = false; FitContent(fit_width_); }
     if (impl_->Root().ChildCount() == 0) Log(LogLevel::Warn, L"empty root");
-    impl_->Show();
+    impl_->Show(activate);
 }
 void Window::Hide() { if (impl_->Hwnd()) ShowWindow(impl_->Hwnd(), SW_HIDE); }
 bool Window::Visible() const { return impl_->Hwnd() && IsWindowVisible(impl_->Hwnd()); }
@@ -495,10 +527,14 @@ Size Window::MeasureContent(float client_width) { return impl_->MeasureContent(c
 void Window::MinSize(Size min_size) { impl_->MinSize(min_size); }
 void Window::GlowIntensity(float intensity) { impl_->GlowIntensity(intensity); }
 float Window::GlowIntensity() const { return impl_->glow_intensity_; }
+void Window::LightTone(lumen::LightTone tone) { impl_->SetLightTone(tone); }
+lumen::LightTone Window::LightTone() const { return impl_->light_tone_; }
 void Window::PerfHud(bool on) { impl_->PerfHud(on); }
 bool Window::PerfHud() const { return impl_->perf_hud_on_; }
 lumen::Backdrop Window::Backdrop() const { return impl_->backdrop_; }
 void Window::Backdrop(lumen::Backdrop backdrop) { impl_->SetBackdrop(backdrop); }
+lumen::ShaderBackdrop Window::BackdropShader() const { return impl_->shader_backdrop_; }
+void Window::BackdropShader(const lumen::ShaderBackdrop& fx) { impl_->SetShaderBackdrop(fx); }
 const Theme& Window::VisualTheme() const { return impl_->theme_; }
 void Window::Motion(MotionMode mode) {
     if (impl_->motion_mode_ == mode) return;
@@ -859,6 +895,10 @@ LRESULT WindowImpl::Handle(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
     case WM_SHOWWINDOW:
         renderer_.SetCompositionVisible(wparam != 0);
         if (!wparam) { renderer_.StopFrameTimer(); animating_ = false; }
+        if (!wparam && shader_backdrop_timer_) {
+            KillTimer(hwnd_, kShaderBackdropTimerId);
+            shader_backdrop_timer_ = false;
+        }
         if (shown_state_ != (wparam != 0)) {
             shown_state_ = wparam != 0;
             if (!shown_state_) {
@@ -873,6 +913,7 @@ LRESULT WindowImpl::Handle(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
         if (activated_state_ != (LOWORD(wparam) != WA_INACTIVE)) {
             activated_state_ = LOWORD(wparam) != WA_INACTIVE;
             if (api_) api_->activated_.Emit(activated_state_);
+            UpdateShaderBackdropTimer();
         }
         return DefWindowProcW(hwnd, msg, wparam, lparam);
     case WM_NCDESTROY:
@@ -904,6 +945,12 @@ LRESULT WindowImpl::Handle(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
             params->rgrc[0].right -= frame_x;
             params->rgrc[0].top += frame_y;
             params->rgrc[0].bottom -= frame_y;
+            // 保险：客户区不越出所在显示器的工作区（多屏尺寸不同时系统可能按主屏换算最大化矩形）。
+            RECT work{};
+            if (MaximizedWorkArea(MonitorFromRect(&params->rgrc[0], MONITOR_DEFAULTTONEAREST), &work)) {
+                RECT clipped{};
+                if (IntersectRect(&clipped, &params->rgrc[0], &work)) params->rgrc[0] = clipped;
+            }
         }
         return 0;
     case WM_NCPAINT:
@@ -981,6 +1028,7 @@ LRESULT WindowImpl::Handle(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
         return 0;
     case WM_SIZE:
         if (wparam == SIZE_MINIMIZED) { renderer_.StopFrameTimer(); animating_ = false; }
+        UpdateShaderBackdropTimer();
         if (wparam == SIZE_MINIMIZED && minimize_to_tray_ && tray_installed_) {
             ShowWindow(hwnd, SW_HIDE);
             return 0;
@@ -1031,11 +1079,33 @@ LRESULT WindowImpl::Handle(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
             info->ptMinTrackSize.x = rect.right - rect.left;
             info->ptMinTrackSize.y = rect.bottom - rect.top;
         }
+        if (frame_ == Frame::Client && !parent_ && (GetWindowLongPtrW(hwnd, GWL_STYLE) & WS_THICKFRAME)) {
+            // WS_POPUP 没有 WS_CAPTION：系统默认把它最大化到整块显示器，盖住任务栏。
+            // 改为工作区外扩一圈边框（WM_NCCALCSIZE 最大化时扣掉这圈），客户区恰好等于工作区。
+            const HMONITOR monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+            MONITORINFO mi{};
+            mi.cbSize = sizeof(mi);
+            RECT work{};
+            if (GetMonitorInfoW(monitor, &mi) && MaximizedWorkArea(monitor, &work)) {
+                const UINT dpi = GetDpiForWindow(hwnd);
+                const int frame_x = GetSystemMetricsForDpi(SM_CXSIZEFRAME, dpi) +
+                                    GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi);
+                const int frame_y = GetSystemMetricsForDpi(SM_CYSIZEFRAME, dpi) +
+                                    GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi);
+                info->ptMaxPosition.x = work.left - mi.rcMonitor.left - frame_x;
+                info->ptMaxPosition.y = work.top - mi.rcMonitor.top - frame_y;
+                info->ptMaxSize.x = work.right - work.left + 2 * frame_x;
+                info->ptMaxSize.y = work.bottom - work.top + 2 * frame_y;
+                info->ptMaxTrackSize.x = std::max(info->ptMaxTrackSize.x, info->ptMaxSize.x);
+                info->ptMaxTrackSize.y = std::max(info->ptMaxTrackSize.y, info->ptMaxSize.y);
+            }
+        }
         return 0;
     }
     case WM_MOUSEMOVE:
         if (LegacyMouseFromPointer()) return 0;
         OnMouseMove(GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam), static_cast<uint32_t>(wparam));
+        SendMessageW(hwnd, WM_SETCURSOR, reinterpret_cast<WPARAM>(hwnd), MAKELPARAM(HTCLIENT, WM_MOUSEMOVE));
         return 0;
     case WM_MOUSELEAVE:
         if (LegacyMouseFromPointer()) return 0;
@@ -1084,6 +1154,12 @@ LRESULT WindowImpl::Handle(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
                       false, MK_MBUTTON);
         return 0;
     case WM_LBUTTONDBLCLK: {
+        // Only discard a legacy double click that we actually emitted for the
+        // same pointer input. ExtraInfo can outlive its input message and must
+        // not suppress an independent legacy/host-dispatched double click.
+        if (LegacyMouseFromPointer() && pointer_click_.PromotedDuplicate(
+            {static_cast<float>(GET_X_LPARAM(lparam)), static_cast<float>(GET_Y_LPARAM(lparam))},
+            static_cast<uint32_t>(GetMessageTime()))) return 0;
         Point p{static_cast<float>(GET_X_LPARAM(lparam)) / scale_,
                 static_cast<float>(GET_Y_LPARAM(lparam)) / scale_};
         if (Control* hit = HitTest(p)) hit->OnMouseDoubleClick(WindowImpl::ToLocal(hit, p));
@@ -1120,11 +1196,21 @@ LRESULT WindowImpl::Handle(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
     case WM_POINTERCAPTURECHANGED:
     case WM_POINTERWHEEL:
     case WM_POINTERHWHEEL:
-        if (OnPointer(msg, wparam, lparam)) return 0;
+        if (OnPointer(msg, wparam, lparam)) {
+            // Mouse-in-pointer does not guarantee WM_SETCURSOR. Refresh after
+            // routing the move, including captures outside the control bounds.
+            POINTER_INPUT_TYPE kind{};
+            if ((msg == WM_POINTERUPDATE || msg == WM_POINTERDOWN || msg == WM_POINTERUP) &&
+                GetPointerType(GET_POINTERID_WPARAM(wparam), &kind) && kind == PT_MOUSE) {
+                SendMessageW(hwnd, WM_SETCURSOR, reinterpret_cast<WPARAM>(hwnd), MAKELPARAM(HTCLIENT, WM_MOUSEMOVE));
+            }
+            return 0;
+        }
         break;
     case WM_CAPTURECHANGED:
         toast_press_ = -1;
         if (captured_) {
+            pointer_click_.Cancel();
             Control* target = captured_;
             captured_ = nullptr;
             target->OnMouseUp({-1.0f, -1.0f}, 0);
@@ -1206,20 +1292,27 @@ LRESULT WindowImpl::Handle(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
             const Point p{static_cast<float>(sp.x) / scale_, static_cast<float>(sp.y) / scale_};
             ptrdiff_t toast_i = -1;
             const ToastPart toast_part = HitToast(p, &toast_i);
-            if (toast_part == ToastPart::Action || toast_part == ToastPart::Close) {
+            if (captured_) {
+                shape = captured_->CursorAt(ToLocal(captured_, p));
+            } else if (toast_part == ToastPart::Action || toast_part == ToastPart::Close) {
                 shape = CursorShape::Hand;
             } else if (!tooltip_close_.IsEmpty() && tooltip_close_.Contains(p)) {
                 shape = CursorShape::Hand;
             } else if (tooltip_hover_) {
                 shape = tooltip_hover_->CursorAt(ToLocal(tooltip_hover_, p));
-            } else if (hovered_) {
-                shape = hovered_->CursorAt(ToLocal(hovered_, p));
+            } else if (Control* hit = HitTest(p)) {
+                // WM_SETCURSOR can precede the move that updates hovered_.
+                shape = hit->CursorAt(ToLocal(hit, p));
             }
             switch (shape) {
             case CursorShape::IBeam: SetCursor(LoadCursorW(nullptr, IDC_IBEAM)); break;
             case CursorShape::Hand: SetCursor(LoadCursorW(nullptr, IDC_HAND)); break;
             case CursorShape::SizeWE: SetCursor(LoadCursorW(nullptr, IDC_SIZEWE)); break;
             case CursorShape::SizeNS: SetCursor(LoadCursorW(nullptr, IDC_SIZENS)); break;
+            case CursorShape::SizeNWSE: SetCursor(LoadCursorW(nullptr, IDC_SIZENWSE)); break;
+            case CursorShape::SizeNESW: SetCursor(LoadCursorW(nullptr, IDC_SIZENESW)); break;
+            case CursorShape::SizeAll: SetCursor(LoadCursorW(nullptr, IDC_SIZEALL)); break;
+            case CursorShape::Cross: SetCursor(LoadCursorW(nullptr, IDC_CROSS)); break;
             default: SetCursor(LoadCursorW(nullptr, IDC_ARROW)); break;
             }
             return TRUE;
@@ -1237,6 +1330,13 @@ LRESULT WindowImpl::Handle(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
         DestroyWindow(hwnd_);
         return 0;
     case WM_DESTROY:
+        if (ime_detached_) {
+            ime_syncing_ = true;
+            ImmAssociateContext(hwnd_, static_cast<HIMC>(saved_ime_context_));
+            saved_ime_context_ = nullptr;
+            ime_detached_ = false;
+            ime_syncing_ = false;
+        }
         PopupWindow::OwnerDestroyed(this);
         UiaShutdown();
         if (active_busy_) CloseBusy();
@@ -1256,6 +1356,11 @@ LRESULT WindowImpl::Handle(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
         return 0;
     case WM_TIMER:
         if (renderer_.HandleFrameTimer(static_cast<UINT_PTR>(wparam))) return 0;
+        if (static_cast<UINT_PTR>(wparam) == kShaderBackdropTimerId) {
+            if (ShaderBackdropPlaying()) RenderShaderBackdrop(true);
+            else UpdateShaderBackdropTimer();
+            return 0;
+        }
         if (static_cast<UINT_PTR>(wparam) == kToastWakeTimerId) {
             KillTimer(hwnd_, kToastWakeTimerId);
             toast_wake_armed_ = false;
@@ -1321,16 +1426,18 @@ void WindowImpl::UpdateClientSize() {
 }
 
 void WindowImpl::RefreshTheme() {
-    theme_ = MakeTheme(glow_intensity_);
+    theme_ = MakeTheme(glow_intensity_, light_tone_);
     if (motion_mode_ != MotionMode::System)
         theme_.motion_scale = motion_mode_ == MotionMode::Off ? 0.0f : (motion_mode_ == MotionMode::Reduced ? 0.5f : 1.0f);
     backdrop_cache_dirty_ = true;
     Invalidate();
+    if (renderer_.BackdropLayerActive()) RenderShaderBackdrop(false);
+    UpdateShaderBackdropTimer();
 }
 
-void WindowImpl::Show() {
+void WindowImpl::Show(bool activate) {
     if (!parent_) ApplyPlacement();
-    ShowWindow(hwnd_, SW_SHOW);
+    ShowWindow(hwnd_, activate ? SW_SHOW : SW_SHOWNOACTIVATE);
     if (hwnd_) AppBindWindow(hwnd_);
     Invalidate();
 }
@@ -1451,6 +1558,15 @@ void WindowImpl::AddDirtyRect(Rect dip) {
     for (int i = 0; i < dirty_count_; ++i) box = UnionRect(box, dirty_rects_[i]);
     dirty_rects_[0] = box;
     dirty_count_ = 1;
+}
+
+void WindowImpl::SetCaptionVisible(bool visible) {
+    if (!title_bar_ || caption_collapsed_ == !visible) return;
+    caption_collapsed_ = !visible;
+    // 隐藏后标题栏不绘制、不参与命中与 Tab；清掉按钮悬停，避免恢复时残留高亮。
+    SetCaptionHover(HTNOWHERE);
+    title_bar_->Visible(visible);
+    RequestRelayout(L"caption visibility");
 }
 
 void WindowImpl::RequestRelayout(const wchar_t* reason) {
@@ -1735,6 +1851,12 @@ void WindowImpl::GlowIntensity(float intensity) {
     RefreshTheme();
 }
 
+void WindowImpl::SetLightTone(lumen::LightTone tone) {
+    if (light_tone_ == tone) return;
+    light_tone_ = tone;
+    RefreshTheme();
+}
+
 void WindowImpl::PerfHud(bool on) {
     if (perf_hud_on_ == on) return;
     perf_hud_on_ = on;
@@ -1751,6 +1873,101 @@ void WindowImpl::SetBackdrop(Backdrop backdrop) {
     backdrop_cache_.reset();
     backdrop_cache_dirty_ = true;
     Invalidate();
+}
+
+void WindowImpl::SetShaderBackdrop(const ShaderBackdrop& fx) {
+    ShaderBackdrop next = fx;
+    const auto finite = [](float v, float fallback) { return std::isfinite(v) ? v : fallback; };
+    next.intensity = std::clamp(finite(next.intensity, 0.5f), 0.0f, 1.0f);
+    next.speed = std::clamp(finite(next.speed, 1.0f), 0.0f, 20.0f);
+    next.scale = std::clamp(finite(next.scale, 1.0f), 0.1f, 10.0f);
+    next.grain = std::clamp(finite(next.grain, 0.0f), 0.0f, 1.0f);
+    next.max_fps = std::clamp(finite(next.max_fps, 30.0f), 1.0f, 60.0f);
+    next.resolution = std::clamp(finite(next.resolution, 0.5f), 0.25f, 1.0f);
+    next.palette.count = std::min<uint8_t>(next.palette.count, static_cast<uint8_t>(kShaderMaxColors));
+    const bool layer_before = renderer_.BackdropLayerActive();
+    const bool relayer = next.enabled != shader_backdrop_.enabled ||
+                         next.resolution != shader_backdrop_.resolution;
+    const bool refps = next.max_fps != shader_backdrop_.max_fps;
+    shader_backdrop_ = next;
+    if (relayer) renderer_.SetBackdropLayer(next.enabled, next.resolution);
+    if (renderer_.BackdropLayerActive() != layer_before) {
+        // UI 层在透明底 / 不透明底之间切换：背景缓存与整窗都要重画。
+        backdrop_cache_.reset();
+        backdrop_cache_dirty_ = true;
+        Invalidate();
+    }
+    if (refps && shader_backdrop_timer_) {
+        KillTimer(hwnd_, kShaderBackdropTimerId);
+        shader_backdrop_timer_ = false;
+    }
+    if (renderer_.BackdropLayerActive()) RenderShaderBackdrop(false);
+    UpdateShaderBackdropTimer();
+}
+
+bool WindowImpl::ShaderBackdropPlaying() const {
+    if (!shader_backdrop_.enabled || !hwnd_ || !renderer_.BackdropLayerActive()) return false;
+    if (theme_.motion_scale <= 0.001f || shader_backdrop_.speed <= 0.0f) return false;
+    if (!IsWindowVisible(hwnd_) || IsIconic(GetAncestor(hwnd_, GA_ROOT))) return false;
+    return !shader_backdrop_.pause_inactive || activated_state_;
+}
+
+void WindowImpl::UpdateShaderBackdropTimer() {
+    const bool want = ShaderBackdropPlaying();
+    if (want && !shader_backdrop_timer_) {
+        const UINT interval = static_cast<UINT>(1000.0f / shader_backdrop_.max_fps + 0.5f);
+        shader_backdrop_timer_ = SetTimer(hwnd_, kShaderBackdropTimerId, interval, nullptr) != 0;
+        QueryPerformanceCounter(&shader_backdrop_qpc_);
+    } else if (!want && shader_backdrop_timer_) {
+        KillTimer(hwnd_, kShaderBackdropTimerId);
+        shader_backdrop_timer_ = false;
+    }
+}
+
+void WindowImpl::RenderShaderBackdrop(bool advance) {
+    if (!renderer_.BackdropLayerActive() || painting_) return;
+    if (advance) {
+        LARGE_INTEGER now{};
+        LARGE_INTEGER freq{};
+        QueryPerformanceCounter(&now);
+        QueryPerformanceFrequency(&freq);
+        float dt = 0.0f;
+        if (shader_backdrop_qpc_.QuadPart != 0 && freq.QuadPart != 0) {
+            dt = static_cast<float>(now.QuadPart - shader_backdrop_qpc_.QuadPart) /
+                 static_cast<float>(freq.QuadPart);
+        }
+        shader_backdrop_qpc_ = now;
+        // 暂停/卡顿后不跳帧：单步最多推进 0.1 s。
+        dt = std::clamp(dt, 0.0f, 0.1f);
+        shader_backdrop_time_ += dt * shader_backdrop_.speed * theme_.motion_scale;
+        if (shader_backdrop_time_ > 3600.0f) shader_backdrop_time_ -= 3600.0f;
+    }
+    int w = 0, h = 0;
+    ID2D1DeviceContext2* dc = renderer_.BeginBackdrop(&w, &h);
+    if (!dc) return;
+    backdrop_painter_.BeginFrame(dc, &UiText(), 1.0f);
+    const Rect full{0.0f, 0.0f, static_cast<float>(w), static_cast<float>(h)};
+    backdrop_painter_.FillRect(full, theme_.bg);
+    ShaderParams params;
+    params.kind = shader_backdrop_.kind;
+    params.time = shader_backdrop_time_;
+    params.scale = shader_backdrop_.scale;
+    params.intensity = shader_backdrop_.intensity * theme_.glow_intensity;
+    // 全幅填色效果（Mesh / LiquidMetal）与彩色调色板在正文之下：强度封顶，保证文字对比度。
+    constexpr float kBackdropFillCap = 0.35f;
+    if (shader_backdrop_.kind == ShaderKind::MeshGradient || shader_backdrop_.kind == ShaderKind::LiquidMetal ||
+        shader_backdrop_.palette.count > 0) {
+        params.intensity = std::min(params.intensity, kBackdropFillCap);
+    }
+    params.grain = shader_backdrop_.grain;
+    params.seed = shader_backdrop_.seed;
+    params.center = shader_backdrop_.center;
+    params.tint = Color{theme_.accent.r, theme_.accent.g, theme_.accent.b, 1.0f};
+    params.palette = shader_backdrop_.palette;
+    params.shape = shader_backdrop_.shape;
+    backdrop_painter_.DrawShader(full, params);
+    backdrop_painter_.EndFrame();
+    if (!renderer_.EndBackdrop() && renderer_.NeedsRecovery()) Invalidate();
 }
 
 void WindowImpl::DrawBackdrop(const Rect& client) {
@@ -1820,8 +2037,10 @@ void WindowImpl::UpdatePerfHud(float draw_ms, float present_ms, float frame_ms, 
 }
 
 void WindowImpl::BlitBackdrop(ID2D1DeviceContext2* dc, const Rect& client) {
+    // 背景着色层在 UI 之下时，UI 层保持透明底，只叠网格/辉光装饰。
+    const bool layer = renderer_.BackdropLayerActive();
     if (backdrop_ == Backdrop::None || !dc) {
-        painter_.FillRect(client, theme_.bg);
+        if (!layer) painter_.FillRect(client, theme_.bg);
         return;
     }
     const bool size_ok = backdrop_cache_ && backdrop_cache_->GetPixelSize().width ==
@@ -1840,18 +2059,19 @@ void WindowImpl::BlitBackdrop(ID2D1DeviceContext2* dc, const Rect& client) {
             dc->GetTarget(&previous);
             if (previous) {
                 dc->SetTarget(backdrop_cache_.get());
-                painter_.FillRect(client, theme_.bg);
+                if (layer) dc->Clear(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f));
+                else painter_.FillRect(client, theme_.bg);
                 DrawBackdrop(client);
                 dc->SetTarget(previous.get());
                 backdrop_cache_dirty_ = false;
             } else {
                 backdrop_cache_.reset();
-                painter_.FillRect(client, theme_.bg);
+                if (!layer) painter_.FillRect(client, theme_.bg);
                 DrawBackdrop(client);
                 return;
             }
         } else {
-            painter_.FillRect(client, theme_.bg);
+            if (!layer) painter_.FillRect(client, theme_.bg);
             DrawBackdrop(client);
             return;
         }
@@ -2171,7 +2391,7 @@ void WindowImpl::Layout() {
         // 直调虚 Measure 不写 desired_（那是 MeasureChildAt 的职责），必须接返回值；
         // 高度按内容自适应，钳在 120..视口内。
         const Size dialog_desired = active_dialog_->Measure({w, content_h}, theme_);
-        const float dialog_w = std::min(420.0f, w - 24.0f);
+        const float dialog_w = std::min(dialog_desired.w > 0.5f ? dialog_desired.w : 420.0f, w - 24.0f);  // honor the dialog own width (Standard / Wide / CardWidth)
         const float dialog_h = Clamp(dialog_desired.h, 120.0f, std::max(120.0f, content_h - 16.0f));
         active_dialog_->Arrange({(w - dialog_w) * 0.5f,
                                  chrome + (content_h - dialog_h) * 0.5f, dialog_w, dialog_h});
@@ -2219,6 +2439,8 @@ void WindowImpl::Paint() {
         renderer_.Resize(client_w_, client_h_);
         if (renderer_.NeedsRecovery() || !renderer_.Ready()) return;
     }
+    // 背景层在新建/改尺寸/设备重建后是空的：与这一帧 UI 一起补一帧（暂停中也要有画面）。
+    if (renderer_.BackdropNeedsFrame()) RenderShaderBackdrop(false);
     if (busy_task_) {
         bool dropped = false;
         { std::lock_guard<std::mutex> lock(busy_task_->mutex);

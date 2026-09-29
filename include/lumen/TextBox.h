@@ -5,6 +5,8 @@
 #pragma once
 #include "ControlOf.h"
 #include "Signal.h"
+#include "TextLayout.h"
+#include <optional>
 #include <cstdint>
 #include <functional>
 #include <string>
@@ -44,6 +46,14 @@ public:
         RelayoutParent();
         return *this;
     }
+    // Disable composition for strict ASCII/code fields. The window restores its
+    // previous input context when another control gains focus.
+    bool ImeEnabled() const noexcept override { return ime_enabled_; }
+    TextBox& ImeEnabled(bool value) {
+        ime_enabled_ = value;
+        NotifyImeCaret();
+        return *this;
+    }
     bool ReadOnly() const noexcept { return read_only_; }
     TextBox& ReadOnly(bool value) {
         read_only_ = value;
@@ -70,6 +80,24 @@ public:
         Invalidate();
         return *this;
     }
+
+    // Opt-in paragraph editing: a shared shaped layout for drawing, word wrap,
+    // pointer hit testing, selection and IME. Existing role-based fields retain
+    // their established single-line / hard-line behavior until opted in.
+    const TextTypography& Typography() const noexcept { return typography_; }
+    TextBox& Typography(const TextTypography& value);
+    bool WordWrap() const noexcept { return word_wrap_; }
+    TextBox& WordWrap(bool value);
+    TextBox& Foreground(Color value) { foreground_ = value; Invalidate(); return *this; }
+    TextBox& TextBackdrop(Color value) { text_backdrop_ = value; Invalidate(); return *this; }
+    TextBox& SelectionFill(Color value) { selection_fill_ = value; Invalidate(); return *this; }
+    TextBox& ContentPadding(float value);
+    TextBox& Chrome(bool value) { paint_chrome_ = value; Invalidate(); return *this; }
+    Size ContentSize(float width = 0.0f) const;
+    size_t VisualLineCount() const;
+    Rect CaretBounds() const;
+    void PlaceCaret(Point local, bool extend = false);
+    void ScrollToStart();
 
     TextBox& OnTextChanged(std::function<void(std::wstring_view)> handler) {
         text_changed_.Subscribe(std::move(handler));
@@ -106,6 +134,8 @@ protected:
     Signal<bool> composing_changed_;
     friend class WindowImpl;
     Size Measure(Size available, const Theme& theme) override;
+    void Arrange(const Rect& rect) override;
+    void Prepare(Painter& painter, const Theme& theme) override;
     void Draw(Painter& painter, const Theme& theme) override;
     bool Focusable() const noexcept override { return true; }
     AutomationControlType AutomationType() const noexcept override {
@@ -161,7 +191,7 @@ protected:
     float VisualCaretX() const;
     void DrawComposition(Painter& painter, const Theme& theme, float x, float text_y, float text_h,
                          float band_y, float band_h) const;
-    virtual bool PaintChrome() const noexcept { return true; }
+    virtual bool PaintChrome() const noexcept { return paint_chrome_; }
     virtual TextRole ContentRole() const noexcept { return role_; }
     virtual float PadLeft() const;
     float PadTop() const;
@@ -187,6 +217,21 @@ protected:
     void InsertMasked(wchar_t ch);
     void ApplyClick(Point local, uint8_t count);
 
+    struct ParagraphState;
+    void EnsureParagraph(float width = 0.0f) const;
+    Rect ParagraphCaret(bool visual) const;
+    size_t DisplayIndex(size_t index) const;
+    size_t DocumentIndex(size_t index) const;
+    void DrawParagraph(Painter&, const Theme&);
+    bool ParagraphKey(uint32_t vk);
+    mutable std::shared_ptr<ParagraphState> paragraph_;
+    TextTypography typography_;
+    bool paragraph_mode_ = false;
+    bool word_wrap_ = false;
+    bool paint_chrome_ = true;
+    float content_padding_ = -1.0f;
+    std::optional<Color> foreground_, text_backdrop_, selection_fill_;
+
     struct Snapshot {
         std::wstring text;
         size_t caret = 0;
@@ -210,6 +255,7 @@ protected:
     float scroll_x_ = 0.0f;
     float scroll_y_ = 0.0f;
     bool read_only_ = false;
+    bool ime_enabled_ = true;
     bool password_ = false;
     bool multiline_ = false;
     bool floating_label_ = false;

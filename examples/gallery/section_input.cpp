@@ -11,6 +11,13 @@ void BuildInput(lumen::StackPanel& column, lumen::Window& window) {
     using namespace std::chrono;
     PageHead(column, L"Input", L"Fill in a value: text, numbers, dates, color, files, sliders.");
 
+    auto& paragraph = Sample(column, L"Paragraph editing", L"Shared LumaText display, word wrapping, selection and IME geometry.");
+    TextTypography typography; typography.family=L"Arial"; typography.size=16.0f; typography.line_height=19.2f;
+    paragraph.Add<TextBox>().Multiline(true).Typography(typography).WordWrap(true)
+        .Text(L"A 12 pt document font is 16 DIP at 100% zoom. Resize this window to reflow the paragraph.\n"
+              L"Mixed text: \u6c34\u7535\u8d39. Selection and composition use the same line layout.")
+        .AccessibleName(L"Paragraph editor").MinSize({0.0f, 132.0f});
+
     auto& text = Sample(
         column, L"TextBox",
         L"Double-click a word · triple-click a line · Ctrl+Backspace · Ctrl+Z · right-click. "
@@ -232,13 +239,28 @@ void BuildInput(lumen::StackPanel& column, lumen::Window& window) {
             window.ShowToast(L"Dropped " + name);
         });
 
-    auto& rich = Sample(column, L"RichLabel", L"Inline strong / secondary / link, wraps on the card width.");
+    auto& rich = Sample(column, L"RichLabel",
+        L"Inline strong / italic / secondary / code / status tone / link, wraps on the card width "
+        L"(CJK included). One RichLabel, three lines: drag across lines or double-click, "
+        L"then Ctrl+A / Ctrl+C.");
     Wide(rich).Add<RichLabel>()
         .Add(L"Used ")
         .Strong(L"85%")
         .Add(L" of the void. ")
         .Secondary(L"Last compact 2h ago. ")
+        .Tone(L"2 warnings", StatusTone::Warning)
+        .Add(L" \u00B7 ")
         .Link(L"Reclaim space", [&window] { window.ShowToast(L"Reclaim"); })
+        .Add(L"\n")
+        .Markup(L"Run `lumen build --release`, then *restart* the host. See [the guide](guide).")
+        .Add(L"\n")
+        .Add(L"\u4E2D\u6587\u6DF7\u6392\u4E0D\u9700\u8981\u7A7A\u683C\u4E5F\u80FD\u6309\u5361\u7247\u5BBD\u5EA6\u6362\u884C\uFF0C")
+        .Strong(L"\u52A0\u7C97")
+        .Add(L"\u4E0E")
+        .Colored(L"\u5F69\u8272", Color{0.133f, 0.827f, 0.933f, 1.0f})
+        .Add(L"\u6587\u5B57\u5728\u540C\u4E00\u6BB5\u843D\u5185\u6392\u7248\u3002")
+        .OnLink([&window](std::wstring_view target) { window.ShowToast(std::wstring(L"Open ") + std::wstring(target)); })
+        .Selectable(true)
         .Grow();
 }
 

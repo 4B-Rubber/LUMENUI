@@ -11,7 +11,7 @@
 
 开发 LUMEN 应用、控件或核心实现时，读 [LUMEN 技能](skills/lumen/SKILL.md)，再按任务加载 reference。纯文档任务只检查相关内容，不触发代码构建或实机检查。
 
-- [业务与实现约束](skills/lumen/references/constraints.md)：单色设计、API、模块边界；修改绘制、动画或宿主生命周期时读对应章节。
+- [业务与实现约束](skills/lumen/references/constraints.md)：暗色光感设计、特殊状态色、图表类别色、光色温与语义瞬时光、API、模块边界；修改控件配色/状态/光效、绘制、动画或宿主生命周期时读对应章节。
 - [应用用法](skills/lumen/references/use.md)：接入、布局、绑定、表格和宿主调用。
 - [扩展与验证](skills/lumen/references/extend.md)：控件接入点、输入/无障碍、库代码验证要求。
 

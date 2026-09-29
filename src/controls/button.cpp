@@ -45,6 +45,8 @@ Button::Button(Button&& o) noexcept
       shimmer_angle_(o.shimmer_angle_),
       bloom_t_(o.bloom_t_),
       bloom_at_(o.bloom_at_),
+      flash_t_(o.flash_t_),
+      flash_tone_(o.flash_tone_),
       click_(std::move(o.click_)),
       command_(o.command_) {
     o.command_ = nullptr;
@@ -68,6 +70,8 @@ Button& Button::operator=(Button&& o) noexcept {
     shimmer_angle_ = o.shimmer_angle_;
     bloom_t_ = o.bloom_t_;
     bloom_at_ = o.bloom_at_;
+    flash_t_ = o.flash_t_;
+    flash_tone_ = o.flash_tone_;
     click_ = std::move(o.click_);
     command_ = o.command_;
     o.command_ = nullptr;
@@ -176,6 +180,8 @@ bool Button::OnAnimate(float dt) {
     active |= EaseTo(glow_t_, lit ? 1.0f : 0.0f, dt, 14.0f);
     active |= EaseTo(scale_t_, pressed_ && enabled_ ? 1.0f : 0.0f, dt, 20.0f);
     active |= EaseTo(bloom_t_, 0.0f, dt, 8.0f);
+    // 状态闪光：指数衰减，约 0.5 s 余 30%、1 s 余 8%，1.4 s 内归零。
+    active |= EaseTo(flash_t_, 0.0f, dt, 2.6f, 0.01f);
     if (shimmer_ && lit && MotionScale() > 0.001f) {
         shimmer_angle_ += dt * (2.0f * kPi / 4.0f);
         active = true;
@@ -219,8 +225,8 @@ void Button::Draw(Painter& painter, const Theme& theme) {
     }
     case ButtonKind::Danger: {
         if (enabled_) {
-            fill = pressed_ ? theme.accent_pressed : theme.danger;
-            foreground = theme.accent_text;
+            fill = pressed_ ? theme.danger_pressed : theme.danger;
+            foreground = theme.danger_text;
             rest_glow = 0.30f;
             hover_glow = 0.60f;
             glow_spread = Lerp(1.0f, 1.75f, glow_t_);
@@ -276,23 +282,38 @@ void Button::Draw(Painter& painter, const Theme& theme) {
     }
 
     const float glow_a = Lerp(rest_glow, hover_glow, glow_t_) * theme.glow_intensity;
+    // 辉光强度沿用 glow token；Danger 实心底改取同色 RGB，避免红底外罩白光。
+    const Color glow_rgb = kind_ == ButtonKind::Danger && enabled_ ? theme.danger : theme.glow_sm;
     if (glow_a > 0.004f) {
         if (pill_) {
             const float ring = 5.0f;
-            Color halo = theme.glow_sm;
+            Color halo = glow_rgb;
             halo.a = glow_a * 0.55f;
             painter.FillRoundedRect(r.Inset(-ring, -ring), radius + ring, halo);
         } else {
-            painter.DrawGlow(r, radius, Color{theme.glow_sm.r, theme.glow_sm.g, theme.glow_sm.b, glow_a},
+            painter.DrawGlow(r, radius, Color{glow_rgb.r, glow_rgb.g, glow_rgb.b, glow_a},
                              glow_spread, true);
+        }
+    }
+    // 状态闪光：同色外发光（强度沿用 glow token 并随 glow_intensity）画在底之下。
+    const Color flash_rgb = StatusColor(theme, flash_tone_);
+    const bool flashing = flash_t_ > 0.01f;
+    if (flashing) {
+        const float fa = theme.glow_md.a * flash_t_;
+        if (fa > 0.004f) {
+            painter.DrawGlow(r, radius, Color{flash_rgb.r, flash_rgb.g, flash_rgb.b, fa},
+                             Lerp(1.0f, 1.6f, flash_t_), true);
         }
     }
     if (fill.a > 0.0f) painter.FillRoundedRect(r, radius, fill);
     if (bloom_t_ > 0.01f && enabled_) {
+        // 光爆随光感 token 色温（glow_sm RGB），强度自带 glow_intensity。
         const Point origin{r.x + bloom_at_.x, r.y + bloom_at_.y};
         const float rad = 70.0f + 110.0f * (1.0f - bloom_t_);
-        const Color hot{1.0f, 1.0f, 1.0f, 0.16f * bloom_t_ * theme.glow_intensity};
-        painter.FillRoundedRectRadial(r, radius, origin, rad, hot, Color{1.0f, 1.0f, 1.0f, 0.0f});
+        const Color hot{theme.glow_sm.r, theme.glow_sm.g, theme.glow_sm.b,
+                        0.16f * bloom_t_ * theme.glow_intensity};
+        painter.FillRoundedRectRadial(r, radius, origin, rad, hot,
+                                      Color{theme.glow_sm.r, theme.glow_sm.g, theme.glow_sm.b, 0.0f});
     }
     if (kind_ == ButtonKind::Standard && enabled_ && !pill_) {
         Color inset = theme.edge_light;
@@ -301,6 +322,11 @@ void Button::Draw(Painter& painter, const Theme& theme) {
                                Color{0.0f, 0.0f, 0.0f, Lerp(0.22f, 0.40f, glow_t_)});
     }
     if (border.a > 0.0f) painter.StrokeRoundedRect(r, radius, border);
+    if (flashing) {
+        // 描边是颜色提示本身，不随 glow_intensity 缩放。
+        painter.StrokeRoundedRect(r, radius, Color{flash_rgb.r, flash_rgb.g, flash_rgb.b, flash_t_},
+                                  1.5f);
+    }
     if (shimmer_ && enabled_) {
         const float hot_a = theme.specular_line.a * Lerp(0.50f, 1.0f, glow_t_);
         const Color hot{theme.specular_line.r, theme.specular_line.g, theme.specular_line.b, hot_a};

@@ -244,6 +244,14 @@ CursorShape NumberBox::CursorAt(Point local) const {
 }
 
 void NumberBox::Draw(Painter& painter, const Theme& theme) {
+    if (!error_.empty() && enabled_) {
+        // 错误态外沿 danger 同色柔光，强度沿用 glow token；红描边仍是主提示。
+        const float a = theme.glow_sm.a * 0.9f;
+        if (a > 0.004f) {
+            painter.DrawGlow(absolute_, theme.radius_control,
+                             Color{theme.danger.r, theme.danger.g, theme.danger.b, a}, 0.7f, true);
+        }
+    }
     TextBox::Draw(painter, theme);
     if (!unit_.empty()) painter.DrawText(unit_, {absolute_.Right() - (spin_ ? kSpinWidth : 0.0f) - unit_width_ - 6.0f,
         absolute_.y, unit_width_, absolute_.h}, TextRole::Caption, theme.text_secondary);

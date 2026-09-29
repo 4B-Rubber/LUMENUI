@@ -2,6 +2,7 @@
 #pragma once
 #include "com_ptr.h"
 #include "lumen/Core.h"
+#include "lumen/TextLayout.h"
 #include <dwrite_3.h>
 #include <cstddef>
 #include <list>
@@ -23,6 +24,11 @@ public:
     // 角色格式；有字体族覆盖（PushFamily）时返回同角色字号/字重但换族的缓存格式。
     IDWriteTextFormat* Format(TextRole role);
     IDWriteTextFormat* IconFormat(float size);
+    // The caller owns the returned paragraph; UI display and editing share it.
+    // spans 在行高计算前套用（区间字号参与统一行高基线）。
+    IDWriteTextLayout* ParagraphLayout(std::wstring_view text, const TextTypography& style,
+                                       float width, bool wrap, float scale,
+                                       std::span<const TextSpanStyle> spans = {});
 
     // 自定义字体（内存复制 / 文件引用）进进程级 IDWriteFontCollection1；返回首个族名。
     std::wstring AddFont(std::span<const std::byte> data);
@@ -41,6 +47,9 @@ public:
     IDWriteTextLayout* WrapLayout(std::wstring_view text, IDWriteTextFormat* format,
                                   float wrap_width);
 
+    // 等宽代码字体族：Cascadia Mono（Win11）→ Consolas，首次探测后缓存。
+    const wchar_t* CodeFamily();
+
     Size MeasureText(std::wstring_view text, TextRole role, float max_width = 0.0f);
     float MeasureWrapped(std::wstring_view text, TextRole role, float wrap_width);
 
@@ -55,6 +64,7 @@ private:
     IDWriteTextLayout* LayoutForKey(IDWriteTextFormat* format, std::wstring_view text, float width,
                                     bool wrap, Align align);
     const wchar_t* ResolveFamily(const wchar_t* family, const wchar_t* fallback);
+    const wchar_t* code_family_ = nullptr;
 
     struct LayoutKey {
         const void* format;

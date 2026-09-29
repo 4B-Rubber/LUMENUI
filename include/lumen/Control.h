@@ -42,7 +42,9 @@ struct WeakLink {
 };
 
 // 指针形态（公共 API 不暴露 HCURSOR，窗口在 WM_SETCURSOR 里映射为系统光标）。
-enum class CursorShape { Arrow, IBeam, Hand, SizeWE, SizeNS };
+// Keep the original values stable; diagonal resizing belongs in the input router,
+// not in application-specific native message hooks.
+enum class CursorShape { Arrow, IBeam, Hand, SizeWE, SizeNS, SizeNWSE, SizeNESW, SizeAll, Cross };
 
 // 无障碍控件类型。映射到 UIA Control Type；公共头不暴露 UIAutomation.h。
 enum class AutomationControlType : uint8_t {
@@ -296,6 +298,9 @@ protected:
         return false;
     }
     // 为真时窗口隐藏系统组字窗，由控件把预编辑串画进文本流（候选窗仍走系统 IME）。
+    // Filtered ASCII fields can suspend IME for their LUMEN HWND only.
+    // False does not change the process language or the host's input context.
+    virtual bool ImeEnabled() const noexcept { return true; }
     virtual bool ImeInline() const noexcept { return false; }
     virtual bool ImeComposing() const noexcept { return false; }
     virtual void OnImeCompose(std::wstring_view text, size_t cursor, std::string_view attributes) {
@@ -356,6 +361,8 @@ protected:
     bool EaseTo(float& value, float target, float dt, float speed = 12.0f,
                 float epsilon = 0.002f);
     float MotionScale() const noexcept;
+    // 是否已在窗口动画时钟名单中（默认即播放的持续动画控件据此在首帧自举时钟）。
+    bool AnimationListed() const noexcept { return anim_listed_; }
     bool AdvanceAnimation(Tween& tween, float dt) const noexcept;
     // 键盘焦点环：按 focus_ring_t_ 生长；无窗口时若 FocusVisible 则满强度。
     void PaintFocusRing(Painter& painter, const Theme& theme, const Rect& r,

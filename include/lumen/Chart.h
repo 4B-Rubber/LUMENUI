@@ -1,4 +1,5 @@
-// lumen/Chart.h — 仪表盘图表：一份数据入口，多种圆角单色形态。绘制路径零堆。
+// lumen/Chart.h — 仪表盘图表：一份数据入口，多种圆角形态；系列取 Theme::chart_series 类别色
+// （Monochrome(true) 回到灰阶）。绘制路径零堆。
 // Events: 无（本头无订阅事件）
 // Keys: 无独立快捷键（命中穿透或非焦点）
 // Layout: Grow / FillCross / Margin 走 ControlOf；默认尺寸见 Measure
@@ -57,6 +58,22 @@ public:
     const std::wstring& Title() const noexcept { return title_; }
     const std::wstring& ValueText() const noexcept { return value_text_; }
     const std::wstring& Hint() const noexcept { return hint_; }
+
+    // 默认按 Theme::chart_series 给系列/切片上类别色，主线带同色柔光（随 glow_intensity）；
+    // Monochrome(true) 回到白/灰阶单色形态。Heatmap/Funnel 为主系列色的明度渐变。
+    Chart& Monochrome(bool value) {
+        mono_ = value;
+        Invalidate();
+        return *this;
+    }
+    bool Monochrome() const noexcept { return mono_; }
+    // 类别色起点：系列 i 取 ChartSeriesColor(theme, i + offset)。同一页多张图可错开主色。
+    Chart& PaletteOffset(size_t value) {
+        palette_offset_ = value;
+        Invalidate();
+        return *this;
+    }
+    size_t PaletteOffset() const noexcept { return palette_offset_; }
 
     Chart& PreferredSize(Size size) {
         preferred_ = size;
@@ -140,12 +157,15 @@ protected:
     void BarWindow(size_t& first, size_t& n) const noexcept;
     void ZoomAt(float pivot01, float factor);
     void DrawLegend(Painter& painter, const Theme& theme) const;
+    Color SeriesInk(const Theme& theme, size_t index, size_t count) const noexcept;
     void DrawCartesianHover(Painter& painter, const Theme& theme, const Rect& box, const Point* src,
                             const float* ys, size_t n, bool has_b, const Point* bsrc,
                             const float* bys) const;
 
     ChartKind kind_ = ChartKind::Line;
     ChartBar bar_ = ChartBar::Vertical;
+    bool mono_ = false;
+    size_t palette_offset_ = 0;
     Size preferred_{};
     std::wstring title_;
     std::wstring value_text_;

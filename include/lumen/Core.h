@@ -17,6 +17,13 @@ struct Size {
     float w = 0.0f, h = 0.0f;
 };
 
+// 布局“无约束”约定：容器按内容测量时（Row 主轴、ScrollViewer 滚动轴、Grid auto 列等）
+// 传入 kUnbounded。判定一律用 Bounded()：>= 1e4 DIP 视为无约束。
+// 控件 Measure 契约：无约束轴上返回自然尺寸（内容宽或默认宽），不得把 available 原样
+// 当期望尺寸返回；有约束轴上返回值可小于等于 available（撑满交给父级 Stretch）。
+inline constexpr float kUnbounded = 1.0e5f;
+constexpr bool Bounded(float extent) noexcept { return extent >= 0.0f && extent < 1.0e4f; }
+
 struct Rect {
     float x = 0.0f, y = 0.0f, w = 0.0f, h = 0.0f;
 

@@ -31,7 +31,12 @@ public:
     Label& Role(TextRole role) { role_ = role; RelayoutParent(); return *this; }
     Label& Secondary(bool value) { secondary_ = value; Invalidate(); return *this; }
     Label& Foreground(Color value) { foreground_ = value; Invalidate(); return *this; }
-    Label& Alignment(Align value) { align_ = value; Invalidate(); return *this; }
+    // 换行模式下对齐影响期望宽度（左对齐取内容宽，其余占满），需重新布局。
+    Label& Alignment(Align value) {
+        align_ = value;
+        if (wrap_) RelayoutParent(); else Invalidate();
+        return *this;
+    }
     // 自动换行（按容器宽度）；关闭时单行省略号。
     Label& Wrap(bool value) { wrap_ = value; RelayoutParent(); return *this; }
     // 文字辉光（text-glow）：8 向低透明晕染，仅建议用于标题类大字。

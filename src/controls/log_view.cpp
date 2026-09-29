@@ -10,6 +10,15 @@ namespace {
 constexpr float kBarHit = 10.0f;
 constexpr std::wstring_view kLevels[]{L"DEBUG", L"INFO", L"WARN", L"ERROR"};
 size_t LevelIndex(LogLevel level) { return std::min(static_cast<size_t>(level), size_t{3}); }
+// ERROR/WARN 是特殊状态，用状态色；INFO/DEBUG 保持亮度阶梯。
+Color LevelColor(LogLevel level, const Theme& theme) noexcept {
+    switch (level) {
+    case LogLevel::Error: return theme.danger;
+    case LogLevel::Warn: return theme.warning;
+    case LogLevel::Debug: return theme.text_disabled;
+    default: return theme.text_secondary;
+    }
+}
 std::wstring Fold(std::wstring_view text) {
     std::wstring result(text);
     for (auto& ch : result) ch = static_cast<wchar_t>(std::towlower(ch));
@@ -376,7 +385,8 @@ LogView::Fields LogView::EntryFields(float y, bool has_trace) const noexcept {
 void LogView::Prepare(Painter& painter, const Theme& theme) {
     for (Color color : {theme.fill_input, theme.fill_input_hover, theme.fill_selected, theme.fill_hover,
                         theme.text, theme.text_secondary, theme.text_disabled, theme.stroke_divider,
-                        theme.scrollbar_thumb, theme.scrollbar_thumb_hover, theme.accent}) painter.PrepareColor(color);
+                        theme.scrollbar_thumb, theme.scrollbar_thumb_hover, theme.accent,
+                        theme.danger, theme.danger_subtle, theme.warning}) painter.PrepareColor(color);
     ClampScroll();
     prepared_first_ = static_cast<size_t>(scroll_offset_ / RowHeight());
     const size_t available = visible_.size() - std::min(prepared_first_, visible_.size());
@@ -385,8 +395,7 @@ void LogView::Prepare(Painter& painter, const Theme& theme) {
         auto& entry = prepared_[i];
         ReadEntry(DataIndex(prepared_first_ + i), entry);
         const float y = absolute_.y + static_cast<float>(prepared_first_ + i) * RowHeight() - scroll_offset_;
-        const Color level_color = entry.level == LogLevel::Error ? theme.text :
-                                  entry.level == LogLevel::Debug ? theme.text_disabled : theme.text_secondary;
+        const Color level_color = LevelColor(entry.level, theme);
         if (!entry_) {
             painter.PrepareText(entry.message, {absolute_.x + 10, y, std::max(0.0f, absolute_.w - 28), RowHeight()}, TextRole::Mono, level_color);
             continue;
@@ -411,12 +420,10 @@ void LogView::Draw(Painter& painter, const Theme& theme) {
         const Rect slot{absolute_.x + 4.0f, y, std::max(0.0f, absolute_.w - 8.0f), RowHeight()};
         if (row == selected_) painter.FillRoundedRect(slot, 4.0f, theme.fill_selected);
         else if (row == hover_row_ && enabled_) painter.FillRoundedRect(slot, 4.0f, theme.fill_hover);
-        else if (entry_ && entry.level == LogLevel::Error) painter.FillRect(slot, theme.fill_input_hover);
+        else if (entry_ && entry.level == LogLevel::Error) painter.FillRect(slot, theme.danger_subtle);
         if (entry_ && (entry.level == LogLevel::Error || entry.level == LogLevel::Warn))
-            painter.FillRect({slot.x, slot.y + 5.0f, 2.0f, slot.h - 10.0f},
-                             entry.level == LogLevel::Error ? theme.text : theme.text_secondary);
-        const Color level_color = entry.level == LogLevel::Error ? theme.text :
-                                  entry.level == LogLevel::Debug ? theme.text_disabled : theme.text_secondary;
+            painter.FillRect({slot.x, slot.y + 5.0f, 2.0f, slot.h - 10.0f}, LevelColor(entry.level, theme));
+        const Color level_color = LevelColor(entry.level, theme);
         if (!entry_) {
             painter.DrawText(entry.message, {slot.x + 6.0f, slot.y, std::max(0.0f, slot.w - 20.0f), slot.h}, TextRole::Mono, level_color);
         } else {

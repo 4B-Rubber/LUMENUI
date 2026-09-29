@@ -1,6 +1,6 @@
 // lumen/ListView.h — 虚拟化列表：行按需绘制，十万行也只画可见行。
 // Events: OnGroupExpandedChanged / BindGroupExpandedChanged / OnSelectionChanged / BindSelectionChanged / OnActivate / BindActivate / OnReordered / BindReordered
-// Keys: 焦点控件处理 Enter/Space/方向键等，详见 OnKey
+// Keys: 焦点控件处理 Enter/Space/方向键等，详见 OnKey；拖动重排中 Esc 取消
 // Layout: Grow / FillCross / Margin 走 ControlOf；默认尺寸见 Measure
 #pragma once
 #include "Animate.h"
@@ -56,8 +56,16 @@ public:
     // 下标为数据行（重排后视图行请用 DataIndex）。行不存在则写空。
     ListView& ItemText(std::function<void(size_t, std::wstring&)> provider) {
         item_text_ = std::move(provider);
+        RefreshItems();
         return *this;
     }
+    // Optional secondary line (same data-row index as ItemText). A two-line row
+    // is at least 52 DIP; pointer hit testing and scrolling share that height.
+    ListView& ItemSecondaryText(std::function<void(size_t, std::wstring&)> provider) {
+        item_secondary_ = std::move(provider); RefreshItems(); RelayoutParent(); return *this;
+    }
+    // Refresh external provider data without resetting selection, scroll or order.
+    void RefreshItems();
     ListView& ItemGlyph(std::function<void(size_t, std::wstring&)> provider) {
         item_glyph_ = std::move(provider);
         return *this;
@@ -120,7 +128,8 @@ public:
         return activate_.Connect(std::move(handler));
     }
 
-    // 拖动重排：松手落点插入。分组时只允许组内互换。
+    // 拖动重排：按住行拖过 8 DIP 抬起，行随指针移动、邻行弹簧让位，贴边自动滚动；
+    // 松手落点插入并回弹就位，Esc 或失焦取消。分组时只允许组内移动。
     ListView& CanReorder(bool on) {
         can_reorder_ = on;
         return *this;
@@ -181,7 +190,12 @@ protected:
     std::wstring AutomationItemName(int index) const override {
         if (index < 0 || static_cast<size_t>(index) >= item_count_ || !item_text_) return {};
         std::wstring out;
-        item_text_(DataIndex(static_cast<size_t>(index)), out);
+        const size_t data = DataIndex(static_cast<size_t>(index));
+        item_text_(data, out);
+        if (item_secondary_) {
+            std::wstring secondary; item_secondary_(data, secondary);
+            if (!secondary.empty()) { if (!out.empty()) out += L" | "; out += secondary; }
+        }
         return out;
     }
     bool OnKey(uint32_t vk) override;
@@ -203,7 +217,9 @@ protected:
     void RelayoutParent();
     void BeginEnter();
     float ItemEnter(size_t visible_index) const noexcept;
-    float RowHeight(const Theme& theme) const noexcept { return theme.list_row_height; }
+    float RowHeight(const Theme& theme) const noexcept {
+        return item_secondary_ && theme.list_row_height < 52.0f ? 52.0f : theme.list_row_height;
+    }
     ptrdiff_t RowAt(Point local) const;
     void ClampScroll();
     void MoveSelection(ptrdiff_t delta);
@@ -233,6 +249,12 @@ protected:
     void ResetPress();
     void ApplySwipeX(float x);
     void EndSwipe();
+    bool BeginReorder();
+    void UpdateReorder(Point local);
+    bool StepAutoScroll(float dt);
+    float ReorderShift(ptrdiff_t row) const noexcept;   // 邻行让位偏移（DIP）
+    void CancelReorder();
+    void DropReorder();                                 // 数据变化时立即丢弃拖动状态
     void EndReorder();
     void FinishMut();
     bool LivePaint() const noexcept;
@@ -256,6 +278,7 @@ protected:
     ptrdiff_t hover_group_ = -1;
     std::function<void(size_t, std::wstring&)> item_text_;
     std::function<void(size_t, std::wstring&)> item_glyph_;
+    std::function<void(size_t, std::wstring&)> item_secondary_;
     std::function<void(size_t, Painter&, const Theme&, const Rect&)> item_icon_;
     bool activate_on_click_ = false;
     ItemsModel* model_ = nullptr;
@@ -271,6 +294,7 @@ protected:
     TextRole item_text_role_ = TextRole::Body;
     TextRole group_text_role_ = TextRole::CaptionStrong;
     std::wstring draw_glyph_;
+    std::wstring draw_secondary_;
     Signal<ptrdiff_t, ptrdiff_t> selection_changed_;
     Signal<size_t> activate_;
     Signal<std::wstring_view, bool> group_expanded_changed_;
@@ -290,6 +314,15 @@ protected:
     ptrdiff_t swipe_row_ = -1;
     float swipe_x_ = 0.0f;
     ptrdiff_t drop_row_ = -1;
+    // 重排：float_row_ 为抬起行（松手后保留到回弹结束），gap_ 为让位空槽（视图行，连续值）。
+    ptrdiff_t float_row_ = -1;
+    ptrdiff_t reorder_lo_ = 0;
+    ptrdiff_t reorder_hi_ = 0;
+    float reorder_grab_ = 0.0f;
+    Point reorder_pointer_{};
+    SpringMotion float_top_{};
+    SpringMotion gap_{};
+    float lift_ = 0.0f;
     enum class MutKind : uint8_t { None, Insert, Remove };
     MutKind mut_kind_ = MutKind::None;
     ptrdiff_t mut_index_ = -1;

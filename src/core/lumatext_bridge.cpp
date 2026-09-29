@@ -165,6 +165,7 @@ struct LumaTextBridge::Impl {
         std::uint32_t foreground = 0;
         std::uint32_t background = 0;
         bool dark = false;
+        std::uint64_t paragraph = 0;
 
         bool operator==(const SurfaceKey&) const = default;
     };
@@ -183,6 +184,7 @@ struct LumaTextBridge::Impl {
                 static_cast<std::uint32_t>(key.x_phase_8) << 24 |
                 static_cast<std::uint32_t>(key.y_phase_8) << 16 |
                 (key.dark ? 1u : 0u)));
+            combine(std::hash<std::uint64_t>{}(key.paragraph));
             combine(std::hash<std::uint32_t>{}(key.foreground));
             combine(std::hash<std::uint32_t>{}(key.background));
             return value;
@@ -481,7 +483,8 @@ struct LumaTextBridge::Impl {
         profile_desc.light.coverage_contrast = 1.00f;
         profile_desc.light.raster_filter = LT_RASTER_FILTER_MITCHELL;
         profile_desc.dark = profile_desc.light;
-        profile_desc.regular_optical_weight = 0.06f;
+        // Preserve the established weight now that LumaText applies optical compensation.
+        profile_desc.regular_optical_weight = 0.0f;
         profile_desc.bold_optical_weight = 0.0f;
         return lt_render_profile_create(&profile_desc, profile.put()) == LT_OK;
     }
@@ -522,6 +525,83 @@ struct LumaTextBridge::Impl {
             if (c >= 0x20 && c <= 0x7E) return true;
         }
         return false;
+    }
+
+    bool Paragraph(IDWriteTextLayout* layout, uint64_t identity, D2D1_POINT_2F origin,
+                   D2D1_COLOR_F foreground, D2D1_COLOR_F background, bool prepare) {
+        if (!layout || !renderer || busy || !recording_dc || !target_dc) return false;
+        DWRITE_TEXT_METRICS metrics{};
+        if (FAILED(layout->GetMetrics(&metrics))) return false;
+        DWRITE_OVERHANG_METRICS overhang{};
+        layout->GetOverhangMetrics(&overhang);
+        const float width = std::max(1.0f, layout->GetMaxWidth());
+        const float height = std::max(1.0f, metrics.height + std::max(0.0f, overhang.bottom));
+        const float px = std::floor(origin.x), py = std::floor(origin.y);
+        const float phase_x = origin.x - px, phase_y = origin.y - py;
+        const uint8_t bx = static_cast<uint8_t>(Clamp(std::lround(phase_x * 8.0f), 0l, 7l));
+        const uint8_t by = static_cast<uint8_t>(Clamp(std::lround(phase_y * 4.0f), 0l, 3l));
+        const float cx = bx / 8.0f, cy = by / 4.0f;
+        auto packed = [](D2D1_COLOR_F c) {
+            auto byte = [](float v) { return static_cast<uint32_t>(Clamp(std::lround(v * 255.0f), 0l, 255l)); };
+            return byte(c.r) | (byte(c.g) << 8) | (byte(c.b) << 16) | (byte(c.a) << 24);
+        };
+        const bool dark = 0.2126f * background.r + 0.7152f * background.g + 0.0722f * background.b < 0.5f;
+        const SurfaceKey key{nullptr, static_cast<size_t>(identity),
+            static_cast<int32_t>(std::lround(width * 64.0f)), static_cast<int32_t>(std::lround(height * 64.0f)),
+            DWRITE_TEXT_ALIGNMENT_LEADING, bx, by, packed(foreground), packed(background), dark, identity};
+        if (auto found = surfaces.find(key); found != surfaces.end()) {
+            TouchSurface(found);
+            if (!prepare) {
+                const D2D1_POINT_2F offset{px + phase_x - cx, py + phase_y - cy};
+                target_dc->DrawImage(found->second.commands.Get(), &offset, nullptr,
+                    D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR, D2D1_COMPOSITE_MODE_SOURCE_OVER);
+                ++stats.draw_calls;
+            } else ++stats.prepare_calls;
+            ++stats.surface_cache_hits;
+            return true;
+        }
+        // Preparation owns layout/raster/command-list allocation. Never rebuild
+        // an absent paragraph surface during the drawing pass.
+        if (!prepare) return false;
+        ++stats.surface_cache_misses;
+        Microsoft::WRL::ComPtr<ID2D1CommandList> commands;
+        if (FAILED(recording_dc->CreateCommandList(&commands))) return false;
+        recording_dc->SetTarget(commands.Get());
+        recording_dc->BeginDraw();
+        auto frame_desc = LumaText::Descriptor<lt_frame_desc>();
+        frame_desc.dpi_x = frame_desc.dpi_y = 96.0f;
+        LumaText::Frame frame;
+        if (lt_frame_begin(renderer.get(), &frame_desc, frame.put()) != LT_OK) {
+            recording_dc->EndDraw(); recording_dc->SetTarget(nullptr); return false;
+        }
+        auto draw = LumaText::Descriptor<lt_draw_text_desc>();
+        draw.origin_x = cx; draw.origin_y = cy;
+        draw.clip_enabled = false;
+        draw.foreground = {foreground.r, foreground.g, foreground.b, foreground.a};
+        draw.background = {background.r, background.g, background.b, background.a};
+        draw.background_type = LT_BACKGROUND_TRANSPARENT;
+        draw.render_config = LumaText::Descriptor<lt_render_config>();
+        draw.render_config.coverage_gamma = 0.85f;
+        draw.render_config.coverage_contrast = 1.0f;
+        draw.render_config.raster_filter = LT_RASTER_FILTER_MITCHELL;
+        draw.profile = profile.get();
+        const lt_result result = lt_frame_draw_layout(frame.get(), layout, &draw);
+        auto frame_stats = LumaText::Descriptor<lt_frame_stats>();
+        if (result == LT_OK && lt_frame_get_stats(frame.get(), &frame_stats) == LT_OK) {
+            stats.freetype_glyphs += frame_stats.freetype_glyphs;
+            stats.cache_hits += frame_stats.glyph_cache_hits;
+        }
+        const lt_result ended = lt_frame_end(frame.get());
+        const HRESULT recorded = recording_dc->EndDraw();
+        recording_dc->SetTarget(nullptr);
+        if (result != LT_OK || ended != LT_OK || FAILED(recorded) || FAILED(commands->Close())) return false;
+        // Command lists contain glyph references, not a full paragraph-sized
+        // bitmap. Account conservatively while keeping large text cacheable.
+        const uint64_t estimate = std::min<uint64_t>(kMaxCachedSurfaceBytes,
+            static_cast<uint64_t>(std::max(1.0f, metrics.widthIncludingTrailingWhitespace) * height * 4.0f));
+        StoreSurface(key, commands, std::max<uint64_t>(estimate, 1));
+        ++stats.prepare_calls;
+        return true;
     }
 
     bool ResolveCascade(IDWriteTextFormat* format, std::wstring_view text,
@@ -889,6 +969,16 @@ bool LumaTextBridge::Draw(std::wstring_view text, IDWriteTextFormat* format,
         return false;
     }
     return true;
+}
+
+bool LumaTextBridge::Paragraph(IDWriteTextLayout* layout, uint64_t identity, D2D1_POINT_2F origin,
+                               D2D1_COLOR_F foreground, D2D1_COLOR_F backdrop, bool prepare) {
+#if defined(LUMEN_HAS_LUMATEXT)
+    return impl_ && impl_->Paragraph(layout, identity, origin, foreground, backdrop, prepare);
+#else
+    (void)layout; (void)identity; (void)origin; (void)foreground; (void)backdrop; (void)prepare;
+    return false;
+#endif
 }
 
 bool LumaTextBridge::Measure(std::wstring_view text, IDWriteTextFormat* format, float& width,

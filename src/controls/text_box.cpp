@@ -9,6 +9,7 @@
 #include <windows.h>
 #include <imm.h>
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <cwctype>
 
@@ -194,20 +195,42 @@ void PaintImeUnderline(Painter& painter, float x, float y, float width, Color co
 }
 } // namespace
 
+struct TextBox::ParagraphState {
+    TextLayout layout;
+    std::wstring source, composing, display;
+    TextTypography style;
+    uint64_t revision = ~uint64_t{};
+    size_t insertion = 0, replaced_end = 0;
+    float width = -1.0f;
+    bool wrap = false;
+    size_t affinity_index = 0, affinity_cluster = 0;
+    bool affinity_trailing = false, pending_hit = false;
+    std::optional<float> preferred_x;
+    std::vector<Rect> selection, composition;
+    Rect caret{}, drop{};
+};
+
 void TextBox::RelayoutParent() { Control::RelayoutParent(); }
 
 float TextBox::PadLeft() const {
+    if (content_padding_ >= 0.0f) return content_padding_;
     return glyph_.empty() ? kPadX : kPadX + kGlyphSlot;
 }
 
 float TextBox::PadTop() const {
+    if (content_padding_ >= 0.0f) return content_padding_;
     if (multiline_) return kPadY;
     return floating_label_ && !placeholder_.empty() ? kFloatBand : 0.0f;
 }
 
-float TextBox::PadRight() const { return kPadX; }
+float TextBox::PadRight() const { return content_padding_ >= 0.0f ? content_padding_ : kPadX; }
 
 float TextBox::LineHeight() const {
+    if (paragraph_mode_) {
+        EnsureParagraph();
+        const auto lines = paragraph_->layout.Lines();
+        return lines.empty() ? typography_.size * 1.2f : lines.front().height;
+    }
     std::optional<FontFamilyScope> family_guard;
     if (!family_.empty()) family_guard.emplace(family_);
     // 与 Painter::DrawTextWrapped / MeasureWrappedHeight 同一探针，避免行高漂移导致点选错位。
@@ -385,9 +408,17 @@ bool TextBox::Redo() {
 }
 
 Size TextBox::Measure(Size available, const Theme& theme) {
+    if (paragraph_mode_) {
+        const float width = available.w > 0.5f && Bounded(available.w) ? available.w : 280.0f;
+        EnsureParagraph(std::max(0.5f, width - PadLeft() - PadRight()));
+        const auto size = paragraph_->layout.ContentSize();
+        return {width, std::max(PaintChrome() ? theme.input_height : 0.0f, size.h + PadTop() * 2.0f)};
+    }
     if (!multiline_) {
         const float extra = (floating_label_ && !placeholder_.empty()) ? kFloatBand : 0.0f;
-        return {160.0f, theme.input_height + extra};
+        // 默认 160 DIP；有约束且更窄时（紧凑 Row 收缩）随可用宽变窄，不硬撑出父级。
+        const float width = Bounded(available.w) && available.w > 1.0f ? std::min(160.0f, available.w) : 160.0f;
+        return {width, theme.input_height + extra};
     }
     const float width = (available.w > 1.0f && available.w < 1.0e4f) ? available.w : 280.0f;
     // 多行编辑按硬换行排版（与 HitIndex/Caret 一致）；软换行会让绘制行与点选错位。
@@ -432,6 +463,7 @@ void TextBox::ClearCompose(bool notify) {
 }
 
 float TextBox::VisualCaretX() const {
+    if (paragraph_mode_) return ParagraphCaret(true).x;
     float x = CaretX(caret_);
     if (!ime_comp_.empty()) {
         const size_t cursor = std::min(ime_cursor_, ime_comp_.size());
@@ -450,7 +482,9 @@ void TextBox::OnImeCompose(std::wstring_view text, size_t cursor, std::string_vi
     }
     const bool starting = !ime_session_;
     ime_session_ = true;
-    if (HasSelection()) {
+    if (HasSelection() && !paragraph_mode_) {
+        // Paragraph preedit replaces the selection only in its visual layout.
+        // Cancelling IME must leave the original selected text untouched.
         PushUndo();
         DeleteSelection();
         NotifyChanged();
@@ -565,12 +599,24 @@ TextBox& TextBox::Select(size_t start, size_t end) {
 }
 
 size_t TextBox::LineStart(size_t index) const {
+    if (paragraph_mode_) {
+        EnsureParagraph();
+        const auto caret = paragraph_->layout.Caret(DisplayIndex(index));
+        for (const auto& line : paragraph_->layout.Lines())
+            if (caret.y < line.top + line.height - 0.01f) return DocumentIndex(line.start);
+    }
     index = std::min(index, text_.size());
     while (index > 0 && text_[index - 1] != L'\n') --index;
     return index;
 }
 
 size_t TextBox::LineEnd(size_t index) const {
+    if (paragraph_mode_) {
+        EnsureParagraph();
+        const auto caret = paragraph_->layout.Caret(DisplayIndex(index));
+        for (const auto& line : paragraph_->layout.Lines())
+            if (caret.y < line.top + line.height - 0.01f) return DocumentIndex(line.start + line.length - line.newline_length);
+    }
     index = std::min(index, text_.size());
     while (index < text_.size() && text_[index] != L'\n') ++index;
     return index;
@@ -703,6 +749,11 @@ void TextBox::InsertMasked(wchar_t ch) {
 }
 
 float TextBox::CaretX(size_t index) const {
+    if (paragraph_mode_) {
+        EnsureParagraph();
+        if (index == caret_) return ParagraphCaret(false).x;
+        return paragraph_->layout.Caret(DisplayIndex(index)).x;
+    }
     std::optional<FontFamilyScope> family_guard;
     if (!family_.empty()) family_guard.emplace(family_);
     const std::wstring& shown = VisibleText();
@@ -726,6 +777,11 @@ float TextBox::TextAdvance(std::wstring_view text) const {
 }
 
 float TextBox::CaretY(size_t index) const {
+    if (paragraph_mode_) {
+        EnsureParagraph();
+        if (index == caret_) return ParagraphCaret(false).y;
+        return paragraph_->layout.Caret(DisplayIndex(index)).y;
+    }
     if (!multiline_) return 0.0f;
     size_t line = 0;
     const size_t n = std::min(index, text_.size());
@@ -736,6 +792,20 @@ float TextBox::CaretY(size_t index) const {
 }
 
 void TextBox::ScrollCaretIntoView() {
+    if (paragraph_mode_) {
+        EnsureParagraph();
+        const auto caret = ParagraphCaret(true);
+        const auto size = paragraph_->layout.ContentSize();
+        const float w = std::max(1.0f, ContentWidth());
+        const float h = std::max(1.0f, absolute_.h - PadTop() * 2.0f);
+        if (caret.x < scroll_x_) scroll_x_ = caret.x;
+        if (caret.x > scroll_x_ + w - 1.5f) scroll_x_ = caret.x - w + 1.5f;
+        if (caret.y < scroll_y_) scroll_y_ = caret.y;
+        if (caret.Bottom() > scroll_y_ + h) scroll_y_ = caret.Bottom() - h;
+        scroll_x_ = Clamp(scroll_x_, 0.0f, word_wrap_ ? 0.0f : std::max(0.0f, size.w + 1.5f - w));
+        scroll_y_ = Clamp(scroll_y_, 0.0f, std::max(0.0f, size.h - h));
+        return;
+    }
     const float pad = PadLeft();
     const float top = PadTop();
     const float extra = ime_comp_.empty() ? 0.0f : TextAdvance(ime_comp_);
@@ -780,6 +850,10 @@ void TextBox::ScrollCaretIntoView() {
 
 void TextBox::SetCaret(size_t index, bool extend, bool scroll_to_caret) {
     index = SnapTextElement(text_, index);
+    if (paragraph_) {
+        if (!paragraph_->pending_hit || paragraph_->affinity_index != index) paragraph_->affinity_trailing = false;
+        paragraph_->pending_hit = false;
+    }
     caret_ = index;
     if (!extend) anchor_ = index;
     caret_on_ = true;
@@ -816,6 +890,16 @@ void TextBox::InsertText(const wchar_t* begin, size_t count) {
 }
 
 size_t TextBox::HitIndex(Point local) const {
+    if (paragraph_mode_) {
+        EnsureParagraph();
+        const auto hit = paragraph_->layout.HitTest({local.x - PadLeft() + scroll_x_, local.y - PadTop() + scroll_y_});
+        const size_t index = DocumentIndex(hit.index);
+        paragraph_->affinity_index = index;
+        paragraph_->affinity_cluster = hit.cluster;
+        paragraph_->affinity_trailing = hit.trailing;
+        paragraph_->pending_hit = true;
+        return index;
+    }
     std::optional<FontFamilyScope> family_guard;
     if (!family_.empty()) family_guard.emplace(family_);
     const std::wstring& shown = VisibleText();
@@ -905,6 +989,7 @@ void TextBox::Paste() {
 }
 
 bool TextBox::OnKey(uint32_t vk) {
+    if (paragraph_mode_ && ime_comp_.empty() && ParagraphKey(vk)) return true;
     pending_high_surrogate_ = 0;
     const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
     const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
@@ -1068,6 +1153,12 @@ bool TextBox::OnChar(wchar_t ch) {
 }
 
 bool TextBox::ImeCaret(Point& window_dip, float& height_dip) const {
+    if (paragraph_mode_) {
+        const auto caret = ParagraphCaret(true);
+        window_dip = {absolute_.x + PadLeft() + caret.x - scroll_x_, absolute_.y + PadTop() + caret.y - scroll_y_};
+        height_dip = caret.h;
+        return true;
+    }
     const bool float_slot = floating_label_ && !placeholder_.empty() && !multiline_;
     const float x = absolute_.x + PadLeft() + VisualCaretX() - scroll_x_;
     const float y =
@@ -1236,6 +1327,7 @@ bool TextBox::OnAnimate(float dt_seconds) {
 }
 
 void TextBox::Draw(Painter& painter, const Theme& theme) {
+    if (paragraph_mode_) { DrawParagraph(painter, theme); return; }
     std::optional<FontFamilyScope> family_guard;
     if (!family_.empty()) family_guard.emplace(family_);
     const Rect frame = absolute_;
@@ -1382,6 +1474,160 @@ void TextBox::Draw(Painter& painter, const Theme& theme) {
         painter.FillRect({caret_x, caret_y, 1.5f, caret_h}, theme.accent);
     }
     painter.PopClip();
+}
+
+TextBox& TextBox::Typography(const TextTypography& value) {
+    if (paragraph_mode_ && typography_ == value && family_ == value.family) return *this;
+    typography_ = value;
+    family_ = value.family;
+    paragraph_mode_ = true;
+    Invalidate(); RelayoutParent(); NotifyImeCaret();
+    return *this;
+}
+TextBox& TextBox::WordWrap(bool value) {
+    if (paragraph_mode_ && word_wrap_ == value) return *this;
+    word_wrap_ = value; paragraph_mode_ = true;
+    Invalidate(); RelayoutParent(); NotifyImeCaret();
+    return *this;
+}
+TextBox& TextBox::ContentPadding(float value) {
+    if (content_padding_ == value) return *this;
+    content_padding_ = std::isfinite(value) ? std::max(0.0f, value) : 0.0f;
+    Invalidate(); RelayoutParent(); NotifyImeCaret();
+    return *this;
+}
+void TextBox::EnsureParagraph(float width) const {
+    if (!paragraph_) paragraph_ = std::make_shared<ParagraphState>();
+    auto& p = *paragraph_;
+    if (!(width > 0.0f)) width = std::max(0.5f, ContentWidth());
+    TextTypography style = typography_;
+    style.family = family_;
+    const size_t insertion = !ime_comp_.empty() && HasSelection() ? SelectionStart() : caret_;
+    const size_t end = !ime_comp_.empty() && HasSelection() ? SelectionEnd() : caret_;
+    const bool wrap = multiline_ && word_wrap_;
+    if (p.revision == revision_ && p.source == VisibleText() && p.composing == ime_comp_ &&
+        (ime_comp_.empty() || (p.insertion == insertion && p.replaced_end == end)) &&
+        p.width == width && p.style == style && p.wrap == wrap) return;
+    p.source = VisibleText(); p.composing = ime_comp_; p.style = style; p.width = width; p.wrap = wrap;
+    p.insertion = insertion; p.replaced_end = end; p.revision = revision_;
+    p.display = p.source;
+    if (!ime_comp_.empty()) p.display.replace(insertion, end - insertion, ime_comp_);
+    p.layout.Layout(p.display, style, width, wrap);
+}
+size_t TextBox::DisplayIndex(size_t index) const {
+    index = std::min(index, text_.size());
+    if (!paragraph_ || ime_comp_.empty()) return index;
+    if (index < paragraph_->insertion) return index;
+    if (index < paragraph_->replaced_end) return paragraph_->insertion;
+    return index - (paragraph_->replaced_end - paragraph_->insertion) + ime_comp_.size();
+}
+size_t TextBox::DocumentIndex(size_t index) const {
+    if (!paragraph_ || ime_comp_.empty()) return std::min(index, text_.size());
+    const size_t start = paragraph_->insertion, finish = start + ime_comp_.size();
+    if (index <= start) return index;
+    if (index < finish) return start;
+    return std::min(text_.size(), index - ime_comp_.size() + paragraph_->replaced_end - start);
+}
+Rect TextBox::ParagraphCaret(bool visual) const {
+    EnsureParagraph();
+    if (visual && !ime_comp_.empty())
+        return paragraph_->layout.Caret(paragraph_->insertion + std::min(ime_cursor_, ime_comp_.size()));
+    if (paragraph_->affinity_trailing && paragraph_->affinity_index == caret_ && ime_comp_.empty())
+        return paragraph_->layout.Caret(paragraph_->affinity_cluster, true);
+    return paragraph_->layout.Caret(DisplayIndex(caret_));
+}
+Size TextBox::ContentSize(float width) const {
+    if (paragraph_mode_) { EnsureParagraph(width); return paragraph_->layout.ContentSize(); }
+    float widest = 0.0f; size_t begin = 0;
+    for (size_t i = 0; i <= text_.size(); ++i) {
+        if (i == text_.size() || text_[i] == L'\n') {
+            widest = std::max(widest, TextAdvance(std::wstring_view(text_).substr(begin, i - begin)));
+            begin = i + 1;
+        }
+    }
+    return {widest, LineHeight() * static_cast<float>(HardLineCount())};
+}
+size_t TextBox::VisualLineCount() const {
+    if (!paragraph_mode_) return HardLineCount();
+    EnsureParagraph(); return std::max<size_t>(1, paragraph_->layout.Lines().size());
+}
+Rect TextBox::CaretBounds() const {
+    Rect r = paragraph_mode_ ? ParagraphCaret(true) : Rect{VisualCaretX(), CaretY(caret_), 0, LineHeight()};
+    return r.Offset(PadLeft() - scroll_x_, PadTop() - scroll_y_);
+}
+void TextBox::PlaceCaret(Point local, bool extend) { SetCaret(HitIndex(local), extend, true); }
+void TextBox::ScrollToStart() { scroll_x_ = scroll_y_ = 0.0f; Invalidate(); NotifyImeCaret(); }
+void TextBox::Arrange(const Rect& rect) {
+    Control::Arrange(rect);
+    if (paragraph_mode_) { EnsureParagraph(); ScrollCaretIntoView(); NotifyImeCaret(); }
+}
+void TextBox::Prepare(Painter& painter, const Theme& theme) {
+    if (!paragraph_mode_) return;
+    EnsureParagraph();
+    auto& p = *paragraph_;
+    const auto origin = Point{absolute_.x + PadLeft() - scroll_x_, absolute_.y + PadTop() - scroll_y_};
+    const auto color = enabled_ ? foreground_.value_or(theme.text) : theme.text_disabled;
+    p.layout.Prepare(painter, origin, color, text_backdrop_.value_or(theme.fill_input));
+    p.selection.clear(); p.composition.clear();
+    if (HasSelection() && ime_comp_.empty()) p.layout.Selection(SelectionStart(), SelectionEnd() - SelectionStart(), p.selection);
+    if (!ime_comp_.empty()) p.layout.Selection(p.insertion, ime_comp_.size(), p.composition);
+    p.caret = ParagraphCaret(true);
+    if (drop_preview_ != static_cast<size_t>(-1)) p.drop = p.layout.Caret(DisplayIndex(drop_preview_));
+    painter.PrepareColor(color);
+    painter.PrepareColor(selection_fill_.value_or(theme.fill_selected));
+}
+void TextBox::DrawParagraph(Painter& painter, const Theme& theme) {
+    if (!paragraph_) return;
+    const Rect frame = absolute_;
+    if (PaintChrome()) PaintField(painter, theme, frame, theme.radius_control, enabled_, focused_, hovered_);
+    const auto origin = Point{frame.x + PadLeft() - scroll_x_, frame.y + PadTop() - scroll_y_};
+    const auto color = enabled_ ? foreground_.value_or(theme.text) : theme.text_disabled;
+    const auto selection = selection_fill_.value_or(theme.fill_selected);
+    painter.PushClip(PaintChrome() ? frame.Inset(1.0f, 1.0f) : frame);
+    for (const auto& r : paragraph_->selection) painter.FillRect(r.Offset(origin.x, origin.y), selection);
+    paragraph_->layout.Draw(painter, origin, color, text_backdrop_.value_or(theme.fill_input));
+    for (const auto& r : paragraph_->composition) {
+        const float y = origin.y + r.Bottom() - 1.0f;
+        painter.DrawLine({origin.x + r.x, y}, {origin.x + r.Right(), y}, color, 1.0f);
+    }
+    if (focused_ && enabled_ && caret_on_ && !read_only_) {
+        const auto& r = paragraph_->caret;
+        painter.FillRect({origin.x + r.x, origin.y + r.y, std::max(1.0f / painter.Scale(), 1.0f), r.h}, color);
+    }
+    if (selection_dragging_ && drop_preview_ != static_cast<size_t>(-1) && !read_only_) {
+        const auto& r = paragraph_->drop;
+        painter.FillRect({origin.x + r.x, origin.y + r.y, 1.5f, r.h}, color);
+    }
+    painter.PopClip();
+}
+bool TextBox::ParagraphKey(uint32_t vk) {
+    EnsureParagraph();
+    auto& p = *paragraph_;
+    const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+    const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+    if (vk == VK_UP || vk == VK_DOWN || vk == VK_PRIOR || vk == VK_NEXT) {
+        if (!multiline_) return false;
+        const auto caret = ParagraphCaret(false);
+        if (!p.preferred_x) p.preferred_x = caret.x;
+        const float offset = (vk == VK_PRIOR || vk == VK_NEXT) ? std::max(caret.h, absolute_.h - PadTop() * 2.0f) : caret.h;
+        const float y = caret.y + caret.h * 0.5f + ((vk == VK_UP || vk == VK_PRIOR) ? -offset : offset);
+        SetCaret(HitIndex({*p.preferred_x + PadLeft() - scroll_x_, y + PadTop() - scroll_y_}), shift);
+        return true;
+    }
+    p.preferred_x.reset();
+    if (vk == VK_HOME || vk == VK_END) {
+        if (ctrl) { SetCaret(vk == VK_HOME ? 0 : text_.size(), shift); return true; }
+        const auto caret = ParagraphCaret(false);
+        for (const auto& line : p.layout.Lines()) {
+            if (caret.y < line.top + line.height - 0.01f) {
+                const float x = vk == VK_HOME ? -100000.0f : 100000.0f;
+                SetCaret(HitIndex({x, line.top + line.height * 0.5f + PadTop() - scroll_y_}), shift);
+                return true;
+            }
+        }
+    }
+    p.pending_hit = false;
+    return false;
 }
 
 TextBox& TextBox::BindText(Property<std::wstring>& p) {

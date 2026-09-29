@@ -1,13 +1,11 @@
 # LumaText 预编译依赖
 
-固定的 Windows x64 Release 共享库包，供 LUMEN 日常构建与 Release 直接复用。该目录随源码保存，不放在会被清理的 `build/` 中；无需重新编译 LumaText、FreeType 或 HarfBuzz。
+Windows x64 Debug / Release 共享库，供 LUMEN 本地与 CI 构建复用。
 
-- 原始包：`lumatext-prebuilt-20260906.zip`，来自本仓库的 `lumatext-deps` Release。
-- 原始 ZIP SHA256：`FEAD9871FC68C341E537B437800D22E1E0B8D7F86884D6427A7C8A7423C047A3`。
-- 内容：`include/`、`bin/lumatext.dll`、`lib/lumatext.lib`、`lib/cmake/LumaText/`、`licenses/`。
-- `SHA256SUMS` 固定各依赖文件的字节校验值，CI 构建前核对。不要单独替换 DLL 或导入库，两者与头文件应一起更新。
-- LumaText 与其第三方许可证保留在 `licenses/`，构建时随应用复制，安装 SDK 时一并安装。
+- 来源：Release 已于 2026-09-22 同步同级 lumatext 工作区 out/sdk/Release 的优化编译结果（1,648,128 字节）；Debug 保留 2026-09-20 的既有 SDK。这是本地工作区产物，并非新的远端发布。
+- Debug：bin/lumatextd.dll、lib/lumatextd.lib（MDd）；Release：bin/lumatext.dll、lib/lumatext.lib（MT，静态运行库，开启 Release 体积优化）。
+- 头文件、DLL、导入库作为同一套更新；SHA256SUMS 记录实际包文件，CI 可继续核验。
+- 默认保持 gamma 0.85、Mitchell、透明背景路径；桥接层额外光学补偿归零，避免新版启用旧占位值导致增粗。
+- 已知底色线性合成和实验候选参数不自动启用。许可证在 licenses/。
 
-默认通过 `find_package(LumaText CONFIG)` 导入，不会编译该目录。可用 `LUMATEXT_PREBUILT_DIR` 指向另一份完整包；显式开发源码时同时设置 `LUMEN_USE_PREBUILT_LUMATEXT=OFF` 和 `LUMATEXT_SOURCE_DIR`。
-
-本包只提供 x64 Release 二进制，不代表已验证 ARM64、x86 或独立 Debug 版 LumaText。
+默认使用此包；开发源码时设置 LUMEN_USE_PREBUILT_LUMATEXT=OFF 和 LUMATEXT_SOURCE_DIR。

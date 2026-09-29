@@ -52,6 +52,8 @@ void WindowImpl::AdjustFrameRect(RECT* rect) const {
 }
 
 float WindowImpl::CaptionHeight() const noexcept {
+    if (title_bar_ && caption_collapsed_)
+        return 0.0f;
     if (title_bar_ && title_bar_->Visible())
         return title_bar_->Height();
     // Client 但未建标题栏（titleBar=false）：无标题区。

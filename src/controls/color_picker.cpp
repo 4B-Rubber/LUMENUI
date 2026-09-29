@@ -134,6 +134,7 @@ Rect HexRect(const Rect& box) {
 
 class HexField : public TextBox {
 public:
+    HexField() { ImeEnabled(false); }
     std::function<void(bool)> on_focus;
 
 protected:

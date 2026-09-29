@@ -21,6 +21,17 @@ bool MotionEase(float& value, float target, float dt, const Theme& theme, float 
     if (theme.motion_scale <= 0.001f) { value = target; return false; }
     return EaseTo(value, target, dt / theme.motion_scale, speed, epsilon);
 }
+
+// Toast 语义 → 状态色；Default 保持中性（返回 false）。
+bool ToastTone(ToastKind kind, const Theme& theme, Color& tone, Color& subtle) noexcept {
+    switch (kind) {
+    case ToastKind::Info: tone = theme.info; subtle = theme.info_subtle; return true;
+    case ToastKind::Success: tone = theme.success; subtle = theme.success_subtle; return true;
+    case ToastKind::Warning: tone = theme.warning; subtle = theme.warning_subtle; return true;
+    case ToastKind::Error: tone = theme.danger; subtle = theme.danger_subtle; return true;
+    default: return false;
+    }
+}
 }
 
 bool WindowImpl::OverlayContains(const Control* overlay, const Control* node) {
@@ -643,7 +654,10 @@ void WindowImpl::DrawToasts(Painter& painter, const Theme& theme, const Rect& cl
         fill.a *= alpha;
         // Toast 刻意扁平：无外发光/镜面，只留卡片描边（与全库 Elevated 卡区分）。
         painter.FillRoundedRect(card, 10.0f, fill);
-        Color stroke = theme.stroke_card;
+        Color tone{};
+        Color tone_subtle{};
+        const bool toned = ToastTone(toast.kind, theme, tone, tone_subtle);
+        Color stroke = toned ? Color{tone.r, tone.g, tone.b, 0.40f} : theme.stroke_card;
         stroke.a *= alpha;
         painter.StrokeRoundedRect(card, 10.0f, stroke);
         // 折叠的背后层只露干净的上沿：内容（字形/圆点/文字/操作）展开时才浮现。
@@ -657,10 +671,12 @@ void WindowImpl::DrawToasts(Painter& painter, const Theme& theme, const Rect& cl
         float text_x = card.x + 14.0f;
         if (glyph) {
             const Rect glyph_box{card.x + 12.0f, card.y + (card.h - 24.0f) * 0.5f, 24.0f, 24.0f};
-            Color well = theme.fill_hover;
+            Color well = toned ? tone_subtle : theme.fill_hover;
             well.a *= alpha * content_a;
             painter.FillRoundedRect(glyph_box, 6.0f, well);
-            painter.DrawIcon(glyph, glyph_box, 16.0f, ink);
+            Color glyph_ink = ink;
+            if (toned) glyph_ink = {tone.r, tone.g, tone.b, tone.a * alpha * content_a};
+            painter.DrawIcon(glyph, glyph_box, 16.0f, glyph_ink);
             text_x = glyph_box.Right() + 8.0f;
         } else {
             Color dot = theme.accent;

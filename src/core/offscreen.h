@@ -21,6 +21,8 @@ public:
     bool SavePNG(const wchar_t* path);   // 需先 CoInitializeEx
     bool ReadBack(std::vector<uint8_t>& bgra);
     bool ReadPixel(int x, int y, Color& out);
+    // 阻塞到 GPU 执行完已提交命令（基准测 GPU 完成耗时用；EndDraw 之后调用）。
+    bool Finish();
 
     int Width() const noexcept { return width_; }
     int Height() const noexcept { return height_; }

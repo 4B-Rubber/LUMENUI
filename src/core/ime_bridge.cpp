@@ -89,6 +89,22 @@ void WindowImpl::HandleImeComposition(LPARAM lparam) {
 
 void WindowImpl::SyncImeCaret() {
     if (!hwnd_ || ime_syncing_) return;
+    // ImeInline(false) merely uses the system composition UI. It must not be
+    // mistaken for disabling IME, especially for hexadecimal input in a popup.
+    ime_syncing_ = true;
+    Control* target = ImeTarget();
+    const bool disable = target && !target->ImeEnabled();
+    if (disable && !ime_detached_) {
+        native_ime_target_.Reset();
+        saved_ime_context_ = ImmAssociateContext(hwnd_, nullptr);
+        ime_detached_ = true;
+    } else if (!disable && ime_detached_) {
+        ImmAssociateContext(hwnd_, static_cast<HIMC>(saved_ime_context_));
+        saved_ime_context_ = nullptr;
+        ime_detached_ = false;
+    }
+    ime_syncing_ = false;
+    if (disable) return;
     POINT caret{};
     int line_h = 0;
     RECT doc{};

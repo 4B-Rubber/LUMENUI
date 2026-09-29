@@ -3,6 +3,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cwchar>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -246,6 +247,86 @@ void BuildOverview(lumen::StackPanel& column, lumen::Window& window) {
             .OnClick([id = j.id] { ShowPage(id); });
     }
 
+    auto& fx = Sample(column, L"Shaders",
+        L"GPU procedural light. Mist plays continuously at 30 fps; the others play while hovered "
+        L"and freeze on leave. Glow follows the pointer. The window background is its own "
+        L"composition layer: it animates without repainting any control. Everything is "
+        L"monochrome by default; a palette opts into color (mesh gradient and liquid metal "
+        L"ported from Paper Shaders).");
+    fx.AlignCross(Cross::Stretch);
+    auto& bg_row = fx.Add<WrapPanel>().Gap(8.0f, 8.0f);
+    bg_row.Add<Label>(L"Window background", TextRole::Caption).Secondary(true);
+    struct Bg {
+        const wchar_t* label;
+        bool on;
+        ShaderKind kind;
+    };
+    for (const Bg b : {Bg{L"Off", false, ShaderKind::Flow}, Bg{L"Flow", true, ShaderKind::Flow},
+                       Bg{L"Liquid", true, ShaderKind::Liquid}, Bg{L"Mist", true, ShaderKind::Mist},
+                       Bg{L"Mesh", true, ShaderKind::MeshGradient}}) {
+        bg_row.Add<Button>(b.label, ButtonKind::Subtle)
+            .SizeClass(ButtonSize::Small)
+            .OnClick([&window, b] {
+                ShaderBackdrop next = window.BackdropShader();
+                next.enabled = b.on;
+                next.kind = b.kind;
+                window.BackdropShader(next);
+            });
+    }
+    auto& fx_palette_row = fx.Add<WrapPanel>().Gap(8.0f, 8.0f);
+    fx_palette_row.Add<Label>(L"Palette", TextRole::Caption).Secondary(true);
+    auto fx_views = std::make_shared<std::vector<ShaderView*>>();
+    struct FxPalette {
+        const wchar_t* label;
+        int id;
+    };
+    for (const FxPalette pal : {FxPalette{L"Mono", 0}, FxPalette{L"Aurora", 1}, FxPalette{L"Ember", 2}}) {
+        fx_palette_row.Add<Button>(pal.label, ButtonKind::Subtle)
+            .SizeClass(ButtonSize::Small)
+            .OnClick([&window, fx_views, id = pal.id] {
+                const ShaderPalette next = id == 1   ? ShaderPalette::Aurora()
+                                           : id == 2 ? ShaderPalette::Ember()
+                                                     : ShaderPalette{};
+                for (ShaderView* view : *fx_views) view->Palette(next);
+                ShaderBackdrop backdrop = window.BackdropShader();
+                backdrop.palette = next;
+                window.BackdropShader(backdrop);
+            });
+    }
+    auto& fx_grid = fx.Add<Grid>(2).Gap(12.0f);
+    struct Fx {
+        ShaderKind kind;
+        const wchar_t* name;
+        ShaderPlay play;
+        bool follow;
+        Point center;
+    };
+    for (const Fx f : {Fx{ShaderKind::Mist, L"Mist", ShaderPlay::Always, false, {0.5f, 0.5f}},
+                       Fx{ShaderKind::Glow, L"Glow", ShaderPlay::Hover, true, {0.5f, 0.5f}},
+                       Fx{ShaderKind::DotGrid, L"Dot grid", ShaderPlay::Hover, false, {0.5f, 0.5f}},
+                       Fx{ShaderKind::Rays, L"Rays", ShaderPlay::Hover, false, {0.5f, -0.15f}},
+                       Fx{ShaderKind::Flow, L"Flow", ShaderPlay::Hover, false, {0.5f, 0.3f}},
+                       Fx{ShaderKind::Liquid, L"Liquid", ShaderPlay::Hover, false, {0.5f, 0.5f}},
+                       Fx{ShaderKind::MeshGradient, L"Mesh gradient", ShaderPlay::Hover, false, {0.5f, 0.5f}},
+                       Fx{ShaderKind::LiquidMetal, L"Liquid metal", ShaderPlay::Hover, false, {0.5f, 0.5f}}}) {
+        auto& cell = fx_grid.Add<ZStack>()
+                         .AlignH(ZStack::Align::Start)
+                         .AlignV(ZStack::Align::End)
+                         .Padding(14.0f, 12.0f);
+        auto& fx_view = cell.Add<ShaderView>();
+        fx_views->push_back(&fx_view);
+        if (f.kind == ShaderKind::MeshGradient) fx_view.Palette(ShaderPalette::Aurora());
+        fx_view
+            .Kind(f.kind)
+            .Play(f.play)
+            .FollowPointer(f.follow)
+            .Center(f.center)
+            .CornerRadius(kCardRadius - 4.0f)
+            .Height(150.0f)
+            .FillCross();
+        cell.Add<Label>(f.name, TextRole::BodyStrong);
+    }
+
     auto& project_host = column.Add<Row>();
     auto& project_column = project_host.Add<Column>().MaxSize({680.0f, 0.0f});
     auto& project = Sample(project_column, L"Project settings",
@@ -481,6 +562,24 @@ void BuildOverview(lumen::StackPanel& column, lumen::Window& window) {
         .OnToggled([&window](bool on) {
             if (on) SetIntensity(window, 1.0f);
         });
+    glow.Add<Label>(L"LightTone · tints glow / spotlight / specular only; text and accent stay white.",
+                    TextRole::Caption)
+        .Secondary(true)
+        .Wrap(true);
+    auto& tones = glow.Add<Row>().Spacing(20.0f).AlignCross(Cross::Center);
+    const struct {
+        const wchar_t* name;
+        LightTone tone;
+    } tone_opts[3] = {{L"Neutral", LightTone::Neutral}, {L"Cool", LightTone::Cool}, {L"Warm", LightTone::Warm}};
+    for (const auto& opt : tone_opts) {
+        const LightTone tone = opt.tone;
+        tones.Add<RadioButton>(opt.name)
+            .Group(3)
+            .Checked(window.LightTone() == tone)
+            .OnToggled([&window, tone](bool on) {
+                if (on) window.LightTone(tone);
+            });
+    }
 
     auto& tokens = Sample(column, L"Glow tokens",
                           L"All light tokens scale with glow_intensity. Spotlight is Lumen cards only.");

@@ -8,10 +8,9 @@
 namespace lumen {
 namespace {
 
-constexpr float kInf = 1.0e5f;
-constexpr float kFiniteCap = 1.0e4f;
+constexpr float kInf = kUnbounded;
 
-bool AxisFinite(float v) noexcept { return v >= 0.0f && v < kFiniteCap; }
+bool AxisFinite(float v) noexcept { return Bounded(v); }
 
 // 按嵌套深度租用：子级 Measure/Arrange 不得覆盖父级还在读的缓冲。
 struct LayoutScratch {
@@ -104,6 +103,54 @@ Size StackPanel::Measure(Size available, const Theme& theme) {
         cross = std::max(cross, child_cross);
         if (Child(i).GrowWeight() <= 0.0f) {
             non_grow_main += vertical ? desired.h : desired.w;
+        }
+    }
+
+    // 横向收缩：主轴有约束且非 Grow 子级自然宽度之和放不下时，按自然宽度比例把可用宽度
+    // 分给它们重新测量（换行 Label 折行、普通 Label 省略、输入框变窄）。Measure 不肯变窄
+    // 的子级（按钮、图标）锁定为实际宽度，差额再分给其余子级，最多三轮。
+    // 纵向不收缩：高度随宽度而定，溢出交给外层 ScrollViewer。
+    if (!vertical && AxisFinite(available_main) &&
+        non_grow_main > available_main - spacing_total + 0.5f) {
+        ScratchScope scratch;
+        std::vector<float>& natural = scratch.s.desired_w;
+        std::vector<float>& locked = scratch.s.desired_h;   // >0：已锁定的最终宽度
+        natural.assign(children_.size(), 0.0f);
+        locked.assign(children_.size(), 0.0f);
+        for (size_t i = 0; i < children_.size(); ++i) {
+            if (ChildVisible(i) && Child(i).GrowWeight() <= 0.0f) natural[i] = ChildDesired(i).w;
+        }
+        const float budget = std::max(0.0f, available_main - spacing_total);
+        for (int round = 0; round < 3; ++round) {
+            float open_natural = 0.0f;
+            float fixed = 0.0f;
+            for (size_t i = 0; i < children_.size(); ++i) {
+                if (natural[i] <= 0.0f) continue;
+                if (locked[i] > 0.0f) fixed += locked[i];
+                else open_natural += natural[i];
+            }
+            if (open_natural <= 0.0f) break;
+            const float scale = std::max(0.0f, budget - fixed) / open_natural;
+            if (scale >= 1.0f) break;
+            bool newly_locked = false;
+            for (size_t i = 0; i < children_.size(); ++i) {
+                if (natural[i] <= 0.0f || locked[i] > 0.0f) continue;
+                const float target = natural[i] * scale;
+                const Size d = MeasureChildAt(i, {target, available_cross}, theme);
+                if (d.w > target + 0.5f) {
+                    locked[i] = std::max(d.w, 0.001f);
+                    newly_locked = true;
+                }
+            }
+            if (!newly_locked) break;
+        }
+        non_grow_main = 0.0f;
+        cross = 0.0f;
+        for (size_t i = 0; i < children_.size(); ++i) {
+            if (!ChildVisible(i)) continue;
+            const Size& d = ChildDesired(i);
+            cross = std::max(cross, d.h);
+            if (Child(i).GrowWeight() <= 0.0f) non_grow_main += d.w;
         }
     }
 
@@ -213,14 +260,16 @@ void StackPanel::Arrange(const Rect& absolute) {
         // Stretch 交叉轴拉满容器内宽，不得按期望尺寸撑出父级（折叠侧栏会溢到内容区）。
         float cross_extent = inner_cross;
         const bool stretch = cross_align_ == CrossAlign::Stretch || Child(i).FillsCross();
+        // 非 Stretch 取期望尺寸，但同样不超出容器内宽（与 Stretch 一致，不溢出父级）。
+        const float fit = std::min(cross, inner_cross);
         if (!stretch && cross_align_ == CrossAlign::Start) {
-            cross_extent = cross;
+            cross_extent = fit;
         } else if (!stretch && cross_align_ == CrossAlign::Center) {
-            cross_extent = cross;
-            cross_pos = pad_cross + (inner_cross - cross) * 0.5f;
+            cross_extent = fit;
+            cross_pos = pad_cross + (inner_cross - fit) * 0.5f;
         } else if (!stretch && cross_align_ == CrossAlign::End) {
-            cross_extent = cross;
-            cross_pos = pad_cross + std::max(0.0f, inner_cross - cross);
+            cross_extent = fit;
+            cross_pos = pad_cross + std::max(0.0f, inner_cross - fit);
         }
         const Rect slot = vertical ? Rect{cross_pos, position, cross_extent, along}
                                    : Rect{position, cross_pos, along, cross_extent};
@@ -412,7 +461,20 @@ void Grid::Arrange(const Rect& absolute) {
     }
 
     const float inner_w = absolute.w - padding_h_ * 2.0f;
-    SizeTracks(plan, tracks_, inner_w, gap_x_, AxisFinite(absolute.w), &desired_w);
+    const bool width_finite = AxisFinite(absolute.w);
+    SizeTracks(plan, tracks_, inner_w, gap_x_, width_finite, &desired_w);
+    if (!width_finite) {
+        // 无约束宽度下 fr 列退回内容宽（与 Measure 一致），否则列宽为 0、单元格全部叠在左侧。
+        for (int c = 0; c < plan.n_cols; ++c) {
+            if (tracks_[static_cast<size_t>(c)] <= 0.0f) continue;
+            float w = 0.0f;
+            for (int i = 0; i < n_items; ++i) {
+                if (i % plan.n_cols != c) continue;
+                w = std::max(w, desired_w[(*plan.vis)[static_cast<size_t>(i)]]);
+            }
+            (*plan.col_w)[static_cast<size_t>(c)] = w;
+        }
+    }
 
     plan.row_h->assign(static_cast<size_t>(std::max(plan.n_rows, 0)), 0.0f);
     for (int i = 0; i < n_items; ++i) {
@@ -469,7 +531,12 @@ Size WrapPanel::Measure(Size available, const Theme& theme) {
     int line_items = 0;
     for (size_t i = 0; i < children_.size(); ++i) {
         if (!ChildVisible(i)) continue;
-        const Size desired = MeasureChildAt(i, {kInf, kInf}, theme);
+        // 先按自然尺寸测量；超过一行宽度的项（长换行文字等）再按行宽约束重测，
+        // 收进一行内而不撑破容器。先测自然尺寸是为了让“有约束即撑满”的控件保持自然宽。
+        Size desired = MeasureChildAt(i, {kInf, kInf}, theme);
+        if (AxisFinite(limit) && (horizontal ? desired.w : desired.h) > limit + 0.5f) {
+            desired = MeasureChildAt(i, horizontal ? Size{limit, kInf} : Size{kInf, limit}, theme);
+        }
         const float main = horizontal ? desired.w : desired.h;
         const float cross = horizontal ? desired.h : desired.w;
         if (line_items > 0 && line_main + gap_main + main > limit + 0.01f) {

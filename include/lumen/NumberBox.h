@@ -15,7 +15,7 @@ namespace lumen {
 
 class NumberBox : public TextBox {
 public:
-    NumberBox() { role_ = TextRole::Numeric; }
+    NumberBox() { role_ = TextRole::Numeric; ImeEnabled(false); }
     explicit NumberBox(double value) : NumberBox() { Value(value); }
 
     using TextBox::Role;

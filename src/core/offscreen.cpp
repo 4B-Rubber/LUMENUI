@@ -85,6 +85,24 @@ bool OffscreenRenderer::EndDraw() {
     return SUCCEEDED(dc_->EndDraw());
 }
 
+bool OffscreenRenderer::Finish() {
+    if (!d3d_) return false;
+    ComPtr<ID3D11DeviceContext> context;
+    d3d_->GetImmediateContext(&context);
+    D3D11_QUERY_DESC desc{D3D11_QUERY_EVENT, 0};
+    ComPtr<ID3D11Query> query;
+    if (FAILED(d3d_->CreateQuery(&desc, &query))) return false;
+    context->End(query.get());
+    context->Flush();
+    BOOL done = FALSE;
+    for (;;) {
+        const HRESULT hr = context->GetData(query.get(), &done, sizeof(done), 0);
+        if (hr == S_OK) return done == TRUE;
+        if (FAILED(hr)) return false;
+        YieldProcessor();
+    }
+}
+
 bool OffscreenRenderer::ReadBack(std::vector<uint8_t>& bgra) {
     if (!staging_ || !texture_) return false;
     ComPtr<ID3D11DeviceContext> context;

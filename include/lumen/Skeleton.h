@@ -1,4 +1,4 @@
-// lumen/Skeleton.h — 加载占位骨架：亮度阶梯圆角条 + 呼吸微光（仅 Active 期间推进相位）。
+// lumen/Skeleton.h — 加载占位骨架：亮度阶梯圆角条 + 呼吸 + 横向扫光（仅 Active 期间推进相位）。
 // Events: 无（本头无订阅事件）
 // Keys: 无独立快捷键（命中穿透或非焦点）
 // Layout: Grow / FillCross / Margin 走 ControlOf；默认尺寸见 Measure

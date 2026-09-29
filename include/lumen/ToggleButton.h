@@ -26,6 +26,9 @@ public:
     ToggleButton& SizeClass(ButtonSize value) { size_ = value; RelayoutParent(); return *this; }
     ToggleButton& Pill(bool value) { pill_ = value; Invalidate(); return *this; }
     bool Pill() const noexcept { return pill_; }
+    // 语义色（如 theme.warning / theme.danger）：文字与字形取该色，选中态描边/辉光同取其 RGB；
+    // 未选中时降为次要透明度。a=0（默认）为中性白。
+    ToggleButton& Foreground(Color value) { foreground_ = value; Invalidate(); return *this; }
 
     bool Checked() const noexcept { return checked_; }
     ToggleButton& Checked(bool value);  // programmatic, no OnToggled
@@ -75,6 +78,7 @@ protected:
     ButtonSize size_ = ButtonSize::Medium;
     bool pill_ = false;
     bool checked_ = false;
+    Color foreground_{0.0f, 0.0f, 0.0f, 0.0f};
     float glow_t_ = 0.0f;
     float scale_t_ = 0.0f;
     Signal<bool> toggled_;

@@ -157,6 +157,18 @@ void BuildCollections(lumen::StackPanel& column, lumen::Window& window) {
     PageHead(column, L"Collections",
              L"Lots of data: lists, grids, tables, trees, pages, carousels.");
 
+    auto& file_sample = Sample(column, L"Two-line file queue", L"Secondary text keeps file type and live status visible; refresh preserves selection.");
+    auto complete = std::make_shared<bool>(false);
+    auto& file_list = file_sample.Add<ListView>();
+    file_list.MinSize({0.0f, 166.0f}).MaxSize({100000.0f, 166.0f}).ItemCount(3, false);
+    file_list.ItemText([](size_t i, std::wstring& text) {
+        static constexpr const wchar_t* names[]{L"Drawing.pdf", L"Report.docx", L"Notes.txt"}; text = i < 3 ? names[i] : L"";
+    }).ItemSecondaryText([complete](size_t i, std::wstring& text) {
+        static constexpr const wchar_t* kinds[]{L"PDF", L"Word", L"Text"};
+        text = i < 3 ? std::wstring(kinds[i]) + (*complete ? L" | Completed" : L" | Waiting") : L"";
+    }).ItemGlyph([](size_t, std::wstring& glyph) { glyph = icon::kFile; });
+    file_sample.Add<Button>(L"Change row status").OnClick([complete, &file_list] { *complete = !*complete; file_list.RefreshItems(); });
+
     struct TaskBoard {
         std::vector<ItemRow> tasks{
             {L"Review project settings", L"", {L"Review project settings", L"In progress", L"Alex"}},

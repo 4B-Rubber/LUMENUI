@@ -186,7 +186,7 @@ Size TitleBar::Measure(Size available, const Theme& theme) {
     const float x = CaptionStart() + TitleWidth(available.w) + kTitleGap;
     const float content_w = std::max(0.0f, available.w - x - buttons - 8.0f);
     if (content_) MeasureChildAt(0, {content_w, h}, theme);
-    return {available.w > 0.0f ? available.w : 320.0f, h};
+    return {Bounded(available.w) ? available.w : 320.0f, h};
 }
 
 void TitleBar::Arrange(const Rect& absolute) {
@@ -305,7 +305,10 @@ void TitleBar::Draw(Painter& painter, const Theme& theme) {
         if (local.IsEmpty()) return;
         const Rect slot{bar.x + local.x, bar.y, local.w, local.h};
         if (glow > 0.01f) {
-            painter.FillRect(slot, FadeA(theme.fill_hover, glow));
+            // 关闭是破坏性操作：悬停取 danger_pressed 深红底（Windows 惯例），白叉对比足够；
+            // 最小化/最大化仍为中性白色悬停层。
+            const Color hover = region == Region::Close ? theme.danger_pressed : theme.fill_hover;
+            painter.FillRect(slot, FadeA(hover, glow));
         }
         if (region == Region::Max) {
             const Color punch = glow > 0.01f ? FadeA(theme.fill_hover, glow) : theme.bg;

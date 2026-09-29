@@ -235,7 +235,9 @@ void ScrollViewer::PlaceContent() {
     for (size_t i = 0; i < children_.size(); ++i) {
         if (!ChildVisible(i)) continue;
         const Size& d = ChildDesired(i);
-        const float w = horizontal_ ? std::max(d.w, content_w_) : std::max(d.w, absolute_.w);
+        // 仅纵向滚动时内容宽恒等于视口宽：横向无法滚动，更宽只会被裁掉（并把无约束宽度
+        // 传给子树，Grid 等按无约束处理后排版错乱）。
+        const float w = horizontal_ ? std::max(d.w, content_w_) : absolute_.w;
         SetChildBounds(Child(i), {-scroll_x_, y, w, d.h});
         const float child_top = y;
         const float child_bottom = y + d.h;

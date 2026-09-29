@@ -2,9 +2,40 @@
 
 面向使用者的显著变更，升级注意事项优先。版本遵循语义化：0.x 阶段次版本号代表新能力，修订号代表修复。
 
-## 未发布
+## v0.4.2 — 2026-09-29
 
-暂无。
+### 变更
+
+- 设计语言由纯灰阶调整为“暗色光感 + 特殊状态色”：常规悬停、选中、勾选、焦点仍为白色亮度阶梯，危险/错误、警告、成功、信息改用红、琥珀、绿、蓝区分。
+- `Theme` 新增 `danger_pressed`、`danger_text`、`danger_subtle`、`warning`、`warning_subtle`、`success_subtle`、`info`、`info_subtle`；`danger` / `danger_hover` / `success` 改为彩色值。直接读取这些 token 的自定义控件外观会随之变化。
+- Button/DropDownButton `Danger` 改为红色实心与同色辉光；Badge `Success/Warning`、InfoBar、Toast、Avatar 在线状态、LogView `ERROR/WARN`、ImageView 加载失败使用状态色，TitleBar 关闭按钮悬停改为深红底（最小化/最大化保持中性）；FormField/NumberBox 错误与 ListView 删除滑动随 `danger` token 变红。
+- `ToggleButton::Foreground(Color)`：为筛选类开关指定语义色（文字/字形取该色，选中态描边与辉光同取其 RGB）；Gallery 的 LogView WARN/ERROR 筛选随日志行着色。
+- **图表类别色**：`Theme::chart_series[6]`（cyan / orange / violet / lime / pink / yellow，暗底 400 阶、冷暖交替、避开状态红绿）与 `ChartSeriesColor(theme, i)`。`Chart` 默认按类别色绘制：Line/Area 主系列与基线分色、主线下垫同色柔光（随 `glow_intensity`）、Donut 切片与图例分色、Bar 悬停柱同色辉光，Heatmap/Funnel 为主系列色的明度渐变，Radar/Bullet 取主系列色。`Chart::Monochrome(true)` 恢复原白/灰阶形态；`Chart::PaletteOffset(n)` 错开同页多图的主色。Sparkline/Gauge 仍为单色。**升级注意**：未设置 `Monochrome(true)` 的现有图表外观会变为彩色。
+- **光的色温**：`LightTone { Neutral, Cool, Warm }`，`MakeTheme(glow, tone)` / `Window::LightTone(tone)` 只给辉光、聚光、镜面线、边缘光等光感 token 染极淡冷/暖色，文字、accent 与填充阶梯不变；库默认 `Neutral`（与此前一致），Gallery 默认 `Cool` 并在 Overview › Glow intensity 提供切换。按钮按压光爆改随光感 token 色温。
+- **语义瞬时光**：`StatusTone` + `StatusColor(theme, tone)`；`Button::Flash(StatusTone)` 以状态色闪一次外发光 + 描边、约 1 s 淡出（保存成功/失败等一次性反馈，motion 关闭时不闪）。FormField 错误态在输入控件外沿、NumberBox 错误态在自身外沿加 `danger` 同色柔光（强度沿用 glow token）。
+
+### 新增
+
+- **Shader 调色板**：`ShaderPalette`（最多 8 色 + 可选底色；`Of({...})`、内置 `Aurora()` 冷色 / `Ember()` 暖色，避开状态红绿）经 `ShaderView::Palette(...)` 或 `ShaderBackdrop::palette` 显式开启；默认仍为单色白光。单色效果（Mist/Glow/Rays 等）套调色板后按亮度取色带。
+- **新效果 `ShaderKind::MeshGradient` / `LiquidMetal`**：移植自 [Paper Shaders](https://shaders.paper.design)（Apache-2.0，许可与 NOTICE 见 `third_party/paper-shaders/`）。MeshGradient 无调色板时为 4 级灰阶；LiquidMetal 默认中性灰铬，调色板首色作染色、开启 RGB 色散。形状参数走 `ShaderShape`（`ShaderView::Shape`）。窗口背景使用这两种效果或彩色调色板时强度封顶 0.35，并随 `glow_intensity` 缩放。Gallery Overview › Shaders 新增两块示例、Mono / Aurora / Ember 调色板切换与 Mesh 背景。
+- **TextLayout 区间样式**：`TextSpanStyle`（字重、斜体、字号、字体族、下划线、删除线）参与换行与度量；`Prepare/Draw` 新增 `TextColorSpan` 多色重载，改色不重排。`Painter::Backdrop()` 读取当前文字底色提示。
+- **RichLabel 重写**（基于 TextLayout，原 `Add/Strong/Secondary/Link/Font/Clear` 保持兼容）：新增 `Italic`、`Code`（等宽 + 浅底）、`Colored`、`Tone(StatusTone)`、`Markup`（`**粗**` / `*斜*` / `` `代码` `` / `[文字](目标)`）+ `OnLink`、`Role`、`Alignment`、`Selectable`（拖选可跨行、双击选词、Ctrl+A/C，复制时换行转 CRLF；多段整体可选时写进同一个 RichLabel，段间 `Add(L"\n")`）、`Text()` / `SelectedText()`；读屏名称为全文。
+
+### 修复
+
+- RichLabel 中日韩等无空格文本不换行、整段溢出卡片（旧实现按空格逐词测量）；链接下划线改由字体度量绘制，混排字体基线对齐。**升级注意**：左对齐 RichLabel 的期望宽度变为 `min(内容宽, 可用宽)`（与换行 Label 一致），在 Stretch 容器中外观不变。
+- **布局系统加固**（Row 中放换行 Label 会让整页布局错乱）：
+  - `Row` 在子级自然宽之和超出可用宽时按比例收缩重测，换行 Label 在剩余宽度内折行，按钮保持自然宽；
+  - 换行 `Label` 无约束时返回单行自然宽，左对齐时取 `min(内容宽, 可用宽)`，居中/右对齐仍占满；
+  - 纵向 `ScrollViewer` 内容宽固定为视口宽，不再被子级期望宽度撑出；
+  - `Grid` 在无约束宽度下 Arrange 时 fr 列退回内容宽，不再为 0 导致单元格叠在一起；
+  - `WrapPanel` 把超过行宽的项约束到行宽；
+  - StackPanel `Start/Center/End` 交叉轴不超出容器；
+  - Expander、InfoBar、TitleBar、ComboBox 下拉列表、段落 TextBox 在无约束宽度下返回自然宽，不再返回 1e5 哨兵值；单行 TextBox 在更窄的可用宽下随之变窄。
+  - `Core.h` 新增 `kUnbounded` / `Bounded()` 统一无约束约定。
+  - **升级注意**：左对齐的换行 Label 期望宽度变为内容宽（在 Stretch 容器中外观不变）；在 `AlignCross(Start/Center)` 容器中的短文字不再占满整行。
+- Skeleton 呼吸幅度过小、在黑底上几乎不可见：底色改为在 `fill_hover` 与 `fill_selected` 之间往返，并叠加随光效强度缩放的横向扫光；Gallery 示例默认播放。
+- Skeleton 默认 `Active` 为 true 却从未启动动画时钟（仅 `Active(false→true)` 切换时才会请求），挂载后静止不动：改为首帧绘制时自举时钟；`Control` 新增受保护的 `AnimationListed()` 供此类默认播放控件判断。
 
 ## v0.4.1 — 2026-09-19
 

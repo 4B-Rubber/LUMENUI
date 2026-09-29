@@ -136,6 +136,7 @@ protected:
     float footer_h_ = 0.0f;
     float desc_h_ = 0.0f;
     float error_h_ = 0.0f;
+    Rect input_box_{};   // 首个可见子级（输入控件）的绝对矩形，错误态红色柔光围绕它
     bool required_ = false;
     bool hooked_ = false;
 };

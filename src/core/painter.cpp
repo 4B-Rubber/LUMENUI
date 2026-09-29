@@ -3,6 +3,7 @@
 #include "icon_path.h"
 #include "lumen/Theme.h"
 #include "lumatext_bridge.h"
+#include "shader_effect.h"
 #include "text_service.h"
 #include <d2d1_3.h>
 #include <d2d1effects.h>
@@ -241,6 +242,11 @@ void Painter::ReleaseBrushes() {
         dither_bitmap_ = nullptr;
     }
     ReleaseAcrylic();
+    if (shader_effect_) {
+        shader_effect_->Release();
+        shader_effect_ = nullptr;
+    }
+    shader_failed_ = false;
     for (auto& entry : icon_geometries_) {
         if (entry.second) entry.second->Release();
     }
@@ -446,6 +452,88 @@ bool Painter::CaptureAcrylic() {
     acrylic_output_dirty_ = true;
     acrylic_sigma_px_ = -1.0f;
     return acrylic_captured_;
+}
+
+bool Painter::DrawShader(const Rect& r, const ShaderParams& params) {
+    if (!dc_ || r.IsEmpty() || params.intensity <= 0.0f || params.tint.a <= 0.0f) return false;
+    if (!shader_effect_) {
+        if (shader_failed_) return false;
+        shader_effect_ = CreateShaderEffect(dc_);
+        if (!shader_effect_) {
+            shader_failed_ = true;
+            return false;
+        }
+    }
+    D2D1_MATRIX_3X2_F old{};
+    dc_->GetTransform(&old);
+    // Axis-aligned transforms (the normal DPI scale + translation) draw at device resolution
+    // on whole pixels; anything else keeps the transform and lets D2D resample.
+    const bool axis_aligned = std::fabs(old._12) < 1e-4f && std::fabs(old._21) < 1e-4f &&
+                              old._11 > 0.0f && old._22 > 0.0f;
+    float x = r.x, y = r.y, w = r.w, h = r.h, dpi = scale_;
+    if (axis_aligned) {
+        const float left = std::floor(r.x * old._11 + old._31);
+        const float top = std::floor(r.y * old._22 + old._32);
+        const float right = std::ceil(r.Right() * old._11 + old._31);
+        const float bottom = std::ceil(r.Bottom() * old._22 + old._32);
+        x = left;
+        y = top;
+        w = right - left;
+        h = bottom - top;
+        dpi = old._11;
+    }
+    if (w < 1.0f || h < 1.0f) return false;
+    // Wrap the clock so float precision in the shader never degrades on long sessions.
+    constexpr float kTimeWrap = 3600.0f;
+    const float t = std::fmod(params.time, kTimeWrap);
+    ShaderConstants c{};
+    c.size[0] = w;
+    c.size[1] = h;
+    c.time = t < 0.0f ? t + kTimeWrap : t;
+    c.kind = static_cast<float>(params.kind);
+    c.scale = std::max(0.05f, params.scale);
+    c.intensity = std::clamp(params.intensity, 0.0f, 1.0f);
+    c.grain = std::clamp(params.grain, 0.0f, 1.0f);
+    c.seed = params.seed;
+    c.center[0] = params.center.x;
+    c.center[1] = params.center.y;
+    c.dpi = std::max(0.25f, dpi);
+    c.tint[0] = params.tint.r;
+    c.tint[1] = params.tint.g;
+    c.tint[2] = params.tint.b;
+    c.tint[3] = params.tint.a;
+    const ShaderPalette& pal = params.palette;
+    const uint8_t count = std::min<uint8_t>(pal.count, static_cast<uint8_t>(kShaderMaxColors));
+    c.color_count = static_cast<float>(count);
+    for (uint8_t i = 0; i < count; ++i) {
+        c.colors[i][0] = pal.colors[i].r;
+        c.colors[i][1] = pal.colors[i].g;
+        c.colors[i][2] = pal.colors[i].b;
+        c.colors[i][3] = std::clamp(pal.colors[i].a, 0.0f, 1.0f);
+    }
+    c.back[0] = pal.back.r;
+    c.back[1] = pal.back.g;
+    c.back[2] = pal.back.b;
+    c.back[3] = std::clamp(pal.back.a, 0.0f, 1.0f);
+    const ShaderShape& s = params.shape;
+    const auto fin = [](float v, float lo, float hi, float fallback) {
+        return std::isfinite(v) ? std::clamp(v, lo, hi) : fallback;
+    };
+    c.distortion = fin(s.distortion, 0.0f, 1.0f, 0.8f);
+    c.swirl = fin(s.swirl, 0.0f, 1.0f, 0.1f);
+    c.repetition = fin(s.repetition, 1.0f, 10.0f, 2.0f);
+    c.softness = fin(s.softness, 0.0f, 1.0f, 0.1f);
+    c.shift_red = fin(s.shift_red, -1.0f, 1.0f, 0.3f);
+    c.shift_blue = fin(s.shift_blue, -1.0f, 1.0f, 0.3f);
+    c.metal_distortion = fin(s.metal_distortion, 0.0f, 1.0f, 0.07f);
+    c.contour = fin(s.contour, 0.0f, 1.0f, 0.4f);
+    c.angle = std::isfinite(s.angle) ? s.angle : 70.0f;
+    if (!SetShaderConstants(shader_effect_, c)) return false;
+    if (axis_aligned) dc_->SetTransform(D2D1::Matrix3x2F::Identity());
+    dc_->DrawImage(shader_effect_, D2D1::Point2F(x, y), D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR,
+                   D2D1_COMPOSITE_MODE_SOURCE_OVER);
+    if (axis_aligned) dc_->SetTransform(old);
+    return true;
 }
 
 void Painter::DrawAcrylic(const Rect& r, float sigma, float dim) {

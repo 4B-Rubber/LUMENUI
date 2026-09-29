@@ -1,5 +1,6 @@
 #include "text_service.h"
 #include "log.h"
+#include <algorithm>
 #include <cmath>
 #include <cwchar>
 #include <iterator>
@@ -382,10 +383,77 @@ IDWriteTextFormat* TextService::FamilyFormat(TextRole role, std::wstring_view fa
     return result;
 }
 
+const wchar_t* TextService::CodeFamily() {
+    if (!code_family_) {
+        ComPtr<IDWriteFontCollection> collection;
+        const bool cascadia = Init() && SUCCEEDED(factory_->GetSystemFontCollection(&collection, FALSE)) &&
+                              CollectionHasFamily(collection.get(), L"Cascadia Mono");
+        code_family_ = cascadia ? L"Cascadia Mono" : L"Consolas";
+    }
+    return code_family_;
+}
+
 IDWriteTextFormat* TextService::Format(TextRole role) {
     const std::wstring_view family = CurrentFamily();
     if (!family.empty()) return FamilyFormat(role, family);
     return RoleFormat(role);
+}
+
+IDWriteTextLayout* TextService::ParagraphLayout(std::wstring_view text, const TextTypography& style,
+                                                float width, bool wrap, float scale,
+                                                std::span<const TextSpanStyle> spans) {
+    IDWriteTextFormat* base = Format(TextRole::Body);
+    if (!base || !factory_ || text.size() > UINT32_MAX) return nullptr;
+    std::wstring family = style.family;
+    if (family.empty()) {
+        family.resize(base->GetFontFamilyNameLength() + 1);
+        base->GetFontFamilyName(family.data(), static_cast<UINT32>(family.size()));
+        family.resize(base->GetFontFamilyNameLength());
+    }
+    IDWriteFontCollection* collection = CollectionHasFamily(custom_collection_.get(), family)
+        ? custom_collection_.get() : nullptr;
+    ComPtr<IDWriteTextFormat> format;
+    if (FAILED(factory_->CreateTextFormat(family.c_str(), collection,
+            static_cast<DWRITE_FONT_WEIGHT>(style.weight),
+            style.italic ? DWRITE_FONT_STYLE_ITALIC : DWRITE_FONT_STYLE_NORMAL,
+            DWRITE_FONT_STRETCH_NORMAL, style.size * scale, L"en-US", &format))) return nullptr;
+    ApplyRoleFallback(format.get(), TextRole::Body);
+    ComPtr<IDWriteTextLayout> layout;
+    if (FAILED(factory_->CreateTextLayout(text.data(), static_cast<UINT32>(text.size()), format.get(),
+            std::max(0.5f, width * scale), 1000000.0f, &layout))) return nullptr;
+    layout->SetWordWrapping(wrap ? DWRITE_WORD_WRAPPING_WRAP : DWRITE_WORD_WRAPPING_NO_WRAP);
+    layout->SetTextAlignment(MapAlign(style.alignment));
+    if (style.underline && !text.empty()) layout->SetUnderline(TRUE, {0, static_cast<UINT32>(text.size())});
+    for (const TextSpanStyle& span : spans) {
+        if (span.start >= text.size() || span.length == 0) continue;
+        const DWRITE_TEXT_RANGE range{static_cast<UINT32>(span.start),
+                                      static_cast<UINT32>(std::min(span.length, text.size() - span.start))};
+        if (span.weight > 0) {
+            layout->SetFontWeight(static_cast<DWRITE_FONT_WEIGHT>(Clamp(static_cast<int>(span.weight), 1, 999)), range);
+        }
+        if (span.italic) layout->SetFontStyle(DWRITE_FONT_STYLE_ITALIC, range);
+        if (span.size > 0.0f && std::isfinite(span.size)) {
+            layout->SetFontSize(Clamp(span.size, 0.25f, 2048.0f) * scale, range);
+        }
+        if (!span.family.empty()) {
+            layout->SetFontFamilyName(span.family.c_str(), range);
+            layout->SetFontCollection(CollectionHasFamily(custom_collection_.get(), span.family)
+                                          ? custom_collection_.get() : nullptr, range);
+        }
+        if (span.underline) layout->SetUnderline(TRUE, range);
+        if (span.strikethrough) layout->SetStrikethrough(TRUE, range);
+    }
+    if (style.line_height > 0.0f) {
+        UINT32 count = 0;
+        layout->GetLineMetrics(nullptr, 0, &count);
+        std::vector<DWRITE_LINE_METRICS> lines(count);
+        if (count && SUCCEEDED(layout->GetLineMetrics(lines.data(), count, &count))) {
+            const float height = style.line_height * scale;
+            const float baseline = Clamp(lines[0].baseline + (height - lines[0].height) * 0.5f, 0.0f, height);
+            layout->SetLineSpacing(DWRITE_LINE_SPACING_METHOD_UNIFORM, height, baseline);
+        }
+    }
+    return layout.detach();
 }
 
 IDWriteTextFormat* TextService::IconFormat(float size) {

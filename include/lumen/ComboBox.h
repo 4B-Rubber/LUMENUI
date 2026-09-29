@@ -36,6 +36,8 @@ public:
     }
     ComboBox& ClearItems();
     ComboBox& Items(std::vector<std::wstring> items);
+    // Small tool windows automatically use a detached LUMEN popup when neither
+    // side of the anchor can fit these rows; ordinary windows keep an overlay.
     ComboBox& MaxDropDownRows(size_t value);
     size_t MaxDropDownRows() const noexcept { return max_dropdown_rows_; }
     size_t Count() const noexcept { return items_.size(); }

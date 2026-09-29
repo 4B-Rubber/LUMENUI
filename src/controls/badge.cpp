@@ -4,6 +4,11 @@
 #include "../core/text_service.h"
 
 namespace lumen {
+namespace {
+
+Color WithAlpha(Color c, float a) noexcept { return {c.r, c.g, c.b, a}; }
+
+} // namespace
 
 void Badge::RelayoutParent() { Control::RelayoutParent(); }
 
@@ -21,15 +26,16 @@ void Badge::Draw(Painter& painter, const Theme& theme) {
         text = theme.primary_text;
         glow = true;
         break;
+    // 状态徽标：同色低透明底 + 状态色文字/描边，和中性、强调徽标一眼可分。
     case BadgeTone::Success:
-        fill = theme.fill_hover;
-        text = theme.text;
-        border = theme.control_stroke;
+        fill = theme.success_subtle;
+        text = theme.success;
+        border = WithAlpha(theme.success, 0.45f);
         break;
     case BadgeTone::Warning:
-        fill = theme.fill_hover;
-        text = theme.text;
-        border = theme.control_stroke;
+        fill = theme.warning_subtle;
+        text = theme.warning;
+        border = WithAlpha(theme.warning, 0.45f);
         break;
     case BadgeTone::Neutral:
     default:

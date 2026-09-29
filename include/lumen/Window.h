@@ -12,6 +12,7 @@
 #include "Theme.h"
 #include "App.h"
 #include "Panel.h"
+#include "Shader.h"
 #include "Signal.h"
 #include "Dispatcher.h"
 #include <cstdint>
@@ -121,7 +122,8 @@ enum class ToastMotion {
 };
 enum class MotionMode { System, Full, Reduced, Off };
 
-// 语义靠亮度阶梯与字形，不引入彩色。Default 无自定义字形时画原来的强调圆点。
+// Info/Success/Warning/Error 用字形 + Theme 状态色（info/success/warning/danger）区分；
+// Default 保持中性，无自定义字形时画原来的强调圆点。
 enum class ToastKind { Default, Info, Success, Warning, Error };
 
 inline const wchar_t* ToastKindGlyph(ToastKind kind) noexcept {
@@ -183,8 +185,15 @@ public:
     StackPanel& Root();
     // Client frame only; System frame returns nullptr.
     class TitleBar* TitleBar();
+    // Client frame with a TitleBar only (otherwise no-op / true): false collapses the caption
+    // to 0 DIP so Root() fills the whole client area (presentations, fullscreen). Hiding the
+    // TitleBar via Visible(false) alone still reserves the 40 DIP drag strip.
+    void CaptionVisible(bool visible);
+    bool CaptionVisible() const;
 
-    void Show();
+    // false: show a modeless tool window without stealing native focus.
+    // The showing/shown events and first-show AutoFit still apply.
+    void Show(bool activate = true);
     UiDispatcher Dispatcher() const;
     void Hide();
     bool Visible() const;
@@ -215,6 +224,9 @@ public:
     // 光效强度 0..1：全局缩放辉光/聚光 token。LUMEN 恒为暗色单色主题。
     void GlowIntensity(float intensity);
     float GlowIntensity() const;
+    // 光感 token 色温（Neutral 纯白 / Cool 冷白 / Warm 暖白），只影响辉光、聚光与镜面线。
+    void LightTone(lumen::LightTone tone);
+    lumen::LightTone LightTone() const;
     // Client 帧标题栏右侧的帧耗时 HUD（FPS / 绘制 / 呈现 / 脏区 / 工作集）。默认关；
     // 开启后占用 TitleBar::Status 文案。
     void PerfHud(bool on);
@@ -222,6 +234,10 @@ public:
     // 背景装饰层（画在背景色之上、控件之下）。
     lumen::Backdrop Backdrop() const;
     void Backdrop(lumen::Backdrop backdrop);
+    // 流体/光效背景：UI 之下的独立合成层（见 ShaderBackdrop）。控件树保持透明底，
+    // Backdrop 网格/辉光仍叠在其上。enabled=false 关闭并回到纯背景色。
+    lumen::ShaderBackdrop BackdropShader() const;
+    void BackdropShader(const lumen::ShaderBackdrop& fx);
     // 当前生效主题（颜色 token 快照，随光效强度更新内容）。
     const Theme& VisualTheme() const;
     void Motion(MotionMode mode);

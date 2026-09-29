@@ -69,6 +69,10 @@ void BuildLogViewDemo(lumen::StackPanel& column, lumen::Window& window) {
         .MinSize({200.0f, 0.0f}).MaxSize({200.0f, 0.0f});
     for (size_t i = 0; i < state->levels.size(); ++i)
         state->levels[i] = &toolbar.Add<ToggleButton>(kLevelNames[i]).Pill(true).SizeClass(ButtonSize::Small).Checked(true);
+    // WARN / ERROR 筛选与日志行同色，其余级别保持中性。
+    const Theme& theme = window.VisualTheme();
+    state->levels[static_cast<size_t>(LogLevel::Warn)]->Foreground(theme.warning);
+    state->levels[static_cast<size_t>(LogLevel::Error)]->Foreground(theme.danger);
     state->count = &toolbar.Add<Label>(L"", TextRole::Caption).Secondary(true);
     state->follow = &toolbar.Add<ToggleButton>(L"Following").SizeClass(ButtonSize::Small).Checked(true);
     state->view = &card.Add<LogView>().FillCross().MinSize({0.0f, 312.0f}).MaxSize({0.0f, 312.0f})

@@ -4,8 +4,14 @@
 
 ## 设计语言
 
-- 仅暗色纯黑单色体系，accent 恒为纯白；语义靠亮度阶梯与字形，不引入彩色主题、亮色主题、系统强调色或 `WM_SETTINGCHANGE` 主题跟随。
-- 发光使用 Theme token：`glow_sm/md/lg`、`spotlight_fill/border`、`specular_line`、`ambient_flare`，统一随 `glow_intensity` 缩放；不在控件里硬编码发光白色 alpha。
+- 仅暗色纯黑底光感体系，accent 恒为纯白。常规交互层次（悬停、按压、选中、勾选/开启、焦点环、禁用）靠白色亮度阶梯与字形表达，不改用彩色。
+- 纯灰阶难以区分的特殊状态使用 Theme 状态色：危险/错误 `danger`（红）、警告 `warning`（琥珀）、成功/在线 `success`（绿）、信息 `info`（蓝），底色用对应 `*_subtle`；Danger 实心底用 `danger`/`danger_pressed` + `danger_text`。控件不硬编码状态 RGB；状态色不随 `glow_intensity` 缩放，彩色实心控件的辉光取同色 RGB、强度沿用 glow token。颜色只作附加提示，仍保留字形或文字，满足色觉差异与读屏需求。
+- 已接入状态色：Button/DropDownButton `Danger`、Badge `Success/Warning`、InfoBar 各 Tone、Toast `Info/Success/Warning/Error`（`Default` 保持中性）、Avatar 在线状态、LogView `ERROR/WARN`、FormField/NumberBox 错误、ListView 尾侧删除滑动、ImageView 加载失败、TitleBar 关闭钮悬停（`danger_pressed` 深红底，最小化/最大化仍为中性）；应用侧语义筛选开关用 `ToggleButton::Foreground(theme.warning/danger…)`。新增控件的同类特殊状态沿用这些 token。
+- 图表数据系列用 `Theme::chart_series` / `ChartSeriesColor(theme, i)` 类别色（Chart 默认；`Monochrome(true)` 回灰阶，`PaletteOffset` 错开同页主色）。类别色只标识数据系列，不用于控件状态、装饰或大面积背景；不要用状态色充当系列色。Sparkline/Gauge、装饰仍为单色。Shader 默认单色（白光）；彩色只经 `ShaderView::Palette` / `ShaderBackdrop::palette` 显式开启，内置 `ShaderPalette::Aurora()`（冷）/ `Ember()`（暖）避开状态红绿；窗口背景的 Mesh/LiquidMetal 与彩色调色板强度封顶 0.35 并随 `glow_intensity` 缩放。移植自 Paper Shaders 的代码须保留 `third_party/paper-shaders/` 的 LICENSE/NOTICE 与源文件头注释。
+- 光的色温 `LightTone`（`Window::LightTone` / `MakeTheme(glow, tone)`）只改光感 token 的 RGB：控件取光时用 token 的 RGB（如 `glow_sm.r/g/b`），不要写死 `{1,1,1,a}` 白光，否则色温切换时会漏白。
+- 语义瞬时光：一次性结果反馈用 `Button::Flash(StatusTone)`（同色外发光 + 描边，约 1 s 淡出，由调用方触发，不常驻）；错误态可在输入外沿加 `danger` 同色柔光（FormField/NumberBox 已接入）。状态光强度沿用 glow token 并随 `glow_intensity`，描边等颜色提示本身不缩放。
+- 不引入彩色主题、亮色主题、系统强调色或 `WM_SETTINGCHANGE` 主题跟随；状态色不用于大面积装饰或渐变。
+- 发光使用 Theme token：`glow_sm/md/lg`、`spotlight_fill/border`、`specular_line`、`ambient_flare`，统一随 `glow_intensity` 缩放、随 `LightTone` 染色；不在控件里硬编码发光白色 RGB/alpha。
 - 鼠标追光仅显式开启：`Panel::CardStyle::Lumen` / `Spotlight(true)`；普通控件（包括 Expander/SettingsCard）默认不开追光。默认关闭追光不等于禁止按钮悬停辉光；悬停只增辉，按压才允许中心收缩。
 - 聚光卡不得照穿交互控件：`Panel::AvoidControls` 给非命中穿透子级垫回碳底；Label/IconView 等命中穿透内容随光点亮。
 
@@ -13,6 +19,9 @@
 
 - 用 `Row`/`Column` 堆叠，`Grow(weight)` 主轴 basis 为 0；`AlignMain`/`AlignCross` 在 Grow 之后对齐。`Column` 交叉轴默认 Stretch。
 - `Grid(n)` 等分列；`Grid(1, 0, 1)` 表示 1fr/auto/1fr。页面超出视口用 `ScrollViewer().Grow()`。
+- `Row` 主轴先以无约束宽度测量子级；非 Grow 子级自然宽之和超出可用宽时按自然宽比例收缩重测：换行 `Label` 折行、单行 `Label` 省略、`TextBox` 变窄，按钮/图标等不可收缩项保持自然宽。`Row` 里需占满剩余宽度的文字仍用 `Grow()`。
+- 纵向 `ScrollViewer` 的内容宽恒等于视口宽；`WrapPanel` 把超过行宽的项约束到行宽；StackPanel 非 Stretch 交叉轴不超出容器内宽；Grid 在无约束宽度下 fr 列退回内容宽。
+- 控件 Measure 契约（`Core.h` 的 `kUnbounded` / `Bounded()`）：无约束轴（≥1e4 DIP）返回自然尺寸，不得把 `available` 原样当期望尺寸返回；有约束轴可返回不大于可用宽的尺寸。
 - 应用仅对装饰块直接 `SetBounds`；布局容器内部通过 `Panel::MeasureChildAt/ArrangeChildAt` 等 protected 辅助访问子级，不直接访问子级 `Control` 的 protected 成员。
 
 ## 模块与公共 API

@@ -39,11 +39,11 @@ void BuildStatus(lumen::StackPanel& column, lumen::Window& window) {
         .Enabled(false)
         .ToolTip(L"Enabled(false)");
 
-    auto& skel = Sample(column, L"Skeleton", L"Breathing placeholder while the job runs.");
+    auto& skel = Sample(column, L"Skeleton", L"Breathing placeholder with a light sweep. Abort/Fail pause it; it hides when the job finishes.");
     auto& skeleton = Wide(skel).Add<Skeleton>();
     g_job.skeleton = &skeleton;
     skeleton.Grow();
-    skeleton.Lines(3).Active(false);
+    skeleton.Lines(3).Active(true);
     auto& ready = skel.Add<SettingsCard>();
     g_job.ready = &ready;
     ready.Title(L"Build ready")

@@ -10,6 +10,27 @@ constexpr float kPad = 14.0f;
 constexpr float kClose = 28.0f;
 constexpr float kGlyph = 32.0f;
 constexpr float kActionH = 32.0f;
+
+Color WithAlpha(Color c, float a) noexcept { return {c.r, c.g, c.b, a}; }
+
+// 语气 → 状态色；字形仍按语气区分，颜色只是附加提示。
+Color ToneColor(InfoBar::InfoTone tone, const Theme& theme) noexcept {
+    switch (tone) {
+    case InfoBar::InfoTone::Success: return theme.success;
+    case InfoBar::InfoTone::Warning: return theme.warning;
+    case InfoBar::InfoTone::Critical: return theme.danger;
+    default: return theme.info;
+    }
+}
+
+Color ToneSubtle(InfoBar::InfoTone tone, const Theme& theme) noexcept {
+    switch (tone) {
+    case InfoBar::InfoTone::Success: return theme.success_subtle;
+    case InfoBar::InfoTone::Warning: return theme.warning_subtle;
+    case InfoBar::InfoTone::Critical: return theme.danger_subtle;
+    default: return theme.info_subtle;
+    }
+}
 } // namespace
 
 void InfoBar::RelayoutParent() { Control::RelayoutParent(); }
@@ -58,8 +79,16 @@ Size InfoBar::Measure(Size available, const Theme& theme) {
         tail_w += desired.w + 8.0f;
         tail_h = std::max(tail_h, desired.h);
     }
-    const float text_w =
-        std::max(80.0f, available.w - kPad * 2.0f - kGlyph - 10.0f - tail_w);
+    const float chrome_w = kPad * 2.0f + kGlyph + 10.0f + tail_w;
+    // 无约束宽度（Row 首测）按单行自然宽计，上限 560 DIP，交给父级收缩后再折行。
+    float natural_text = 80.0f;
+    if (!title_.empty()) natural_text = std::max(natural_text, MeasureText(title_, title_role_).w + 1.0f);
+    if (!message_.empty()) {
+        natural_text = std::max(natural_text, MeasureText(message_, message_role_).w + 1.0f);
+    }
+    natural_text = std::min(natural_text, 560.0f);
+    const bool bounded = Bounded(available.w);
+    const float text_w = bounded ? std::max(80.0f, available.w - chrome_w) : natural_text;
     float text_h = 0.0f;
     if (!title_.empty()) text_h += MeasureText(title_, title_role_).h;
     if (!message_.empty()) {
@@ -67,7 +96,8 @@ Size InfoBar::Measure(Size available, const Theme& theme) {
         text_h += MeasureWrapped(message_, message_role_, text_w);
     }
     if (text_h < 20.0f) text_h = 20.0f;
-    return {std::max(available.w, 240.0f), std::max(text_h, std::max(tail_h, kGlyph)) + kPad * 2.0f};
+    const float width = bounded ? std::max(available.w, 240.0f) : std::max(240.0f, chrome_w + text_w);
+    return {width, std::max(text_h, std::max(tail_h, kGlyph)) + kPad * 2.0f};
 }
 
 void InfoBar::Arrange(const Rect& absolute) {
@@ -92,16 +122,18 @@ void InfoBar::Draw(Painter& painter, const Theme& theme) {
     Color fill = theme.fill_input;
     if (tone_ == InfoTone::Warning) fill = theme.fill_input_hover;
     if (tone_ == InfoTone::Critical) fill = theme.fill_input_pressed;
-    painter.FillRoundedRect(absolute_, theme.radius_control, fill);
+    const Color tone = ToneColor(tone_, theme);
     if (tone_ == InfoTone::Critical) {
-        painter.DrawGlow(absolute_, theme.radius_control, theme.glow_sm);
+        painter.DrawGlow(absolute_, theme.radius_control,
+                         Color{tone.r, tone.g, tone.b, theme.glow_sm.a * 0.6f});
     }
-    painter.StrokeRoundedRect(absolute_, theme.radius_control, theme.stroke_card);
+    painter.FillRoundedRect(absolute_, theme.radius_control, fill);
+    painter.StrokeRoundedRect(absolute_, theme.radius_control, WithAlpha(tone, 0.40f));
 
     const Rect glyph_box{absolute_.x + kPad, absolute_.y + (absolute_.h - kGlyph) * 0.5f, kGlyph,
                          kGlyph};
-    painter.FillRoundedRect(glyph_box, 8.0f, theme.fill_hover);
-    painter.DrawIcon(GlyphToDraw(), glyph_box, 16.0f, theme.text);
+    painter.FillRoundedRect(glyph_box, 8.0f, ToneSubtle(tone_, theme));
+    painter.DrawIcon(GlyphToDraw(), glyph_box, 16.0f, tone);
 
     float text_right = absolute_.Right() - kPad;
     if (closable_) text_right -= kClose + 8.0f;

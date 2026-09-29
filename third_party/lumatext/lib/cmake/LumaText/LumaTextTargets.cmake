@@ -7,8 +7,10 @@ if(NOT TARGET LumaText::Shared)
         INTERFACE_INCLUDE_DIRECTORIES "${_lmt_prefix}/include"
         IMPORTED_LOCATION "${_lmt_prefix}/bin/lumatext.dll"
         IMPORTED_IMPLIB "${_lmt_prefix}/lib/lumatext.lib")
-    set_property(TARGET LumaText::Shared APPEND PROPERTY IMPORTED_CONFIGURATIONS RELEASE)
+    set_property(TARGET LumaText::Shared APPEND PROPERTY IMPORTED_CONFIGURATIONS RELEASE DEBUG)
     set_target_properties(LumaText::Shared PROPERTIES
+        IMPORTED_LOCATION_DEBUG "${_lmt_prefix}/bin/lumatextd.dll"
+        IMPORTED_IMPLIB_DEBUG "${_lmt_prefix}/lib/lumatextd.lib"
         IMPORTED_LOCATION_RELEASE "${_lmt_prefix}/bin/lumatext.dll"
         IMPORTED_IMPLIB_RELEASE "${_lmt_prefix}/lib/lumatext.lib")
 endif()

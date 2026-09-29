@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.25)
-project(lumen VERSION 0.4.1 LANGUAGES CXX RC)
+project(lumen VERSION 0.4.2 LANGUAGES CXX RC)
 
 # 修正中文 VS18 / CMake 的 UTF-8 依赖前缀误解码，防止头文件漏编。
 if(MSVC AND CMAKE_CL_SHOWINCLUDES_PREFIX MATCHES "^娉ㄦ剰:")
@@ -112,7 +112,9 @@ add_library(lumen STATIC
     src/core/renderer.cpp
     src/core/offscreen.cpp
     src/core/text_service.cpp
+    src/core/text_layout.cpp
     src/core/painter.cpp
+    src/core/shader_effect.cpp
     src/core/icon_path.cpp
     src/core/theme.cpp
     src/core/animate.cpp
@@ -162,6 +164,7 @@ add_library(lumen STATIC
     src/controls/info_bar.cpp
     src/controls/hyperlink_button.cpp
     src/controls/separator.cpp
+    src/controls/shader_view.cpp
     src/controls/password_box.cpp
     src/controls/skeleton.cpp
     src/controls/rating.cpp
@@ -223,6 +226,26 @@ endif()
 target_link_libraries(lumen PUBLIC
     d3d11 d2d1 dwrite dxgi dcomp dwmapi psapi shcore user32 gdi32 windowscodecs uuid imm32 ole32 oleaut32 uiautomationcore shell32 advapi32)
 target_sources(lumen PRIVATE src/core/lumatext_bridge.cpp)
+
+# ---- 程序化着色器：构建期 fxc（Windows SDK 自带）编译为字节数组头，运行时不依赖着色器编译器 ----
+find_program(LUMEN_FXC fxc
+    HINTS "$ENV{WindowsSdkVerBinPath}/x64" "$ENV{WindowsSdkBinPath}/x64")
+if(NOT LUMEN_FXC)
+    message(FATAL_ERROR "fxc.exe (Windows SDK) not found; configure from a Visual Studio developer environment (vcvars64)")
+endif()
+set(LUMEN_SHADER_DIR ${CMAKE_CURRENT_BINARY_DIR}/generated/shaders)
+set(LUMEN_SHADER_SRC ${CMAKE_CURRENT_SOURCE_DIR}/src/core/shaders/lumen_shader.hlsl)
+set(LUMEN_SHADER_HDR ${LUMEN_SHADER_DIR}/lumen_shader_ps.h)
+file(MAKE_DIRECTORY ${LUMEN_SHADER_DIR})
+add_custom_command(OUTPUT ${LUMEN_SHADER_HDR}
+    COMMAND ${LUMEN_FXC} /nologo /T ps_4_0 /E main /O3 /Vn g_lumen_shader_ps /Fh ${LUMEN_SHADER_HDR} ${LUMEN_SHADER_SRC}
+    DEPENDS ${LUMEN_SHADER_SRC}
+    COMMENT "Compile LUMEN pixel shader"
+    VERBATIM)
+target_sources(lumen PRIVATE ${LUMEN_SHADER_HDR})
+target_include_directories(lumen PRIVATE ${LUMEN_SHADER_DIR})
+# 显式依赖：生成头变化即重编 shader_effect.cpp（不依赖编译器头依赖扫描）。
+set_source_files_properties(src/core/shader_effect.cpp PROPERTIES OBJECT_DEPENDS ${LUMEN_SHADER_HDR})
 if(LUMEN_LUMATEXT_TARGET)
     target_compile_definitions(lumen PRIVATE LUMEN_HAS_LUMATEXT=1
         "LUMEN_LUMATEXT_DLL=\"${LUMEN_LUMATEXT_DLL}\"")

@@ -231,9 +231,9 @@ void ImageView::DrawPlaceholder(Painter& painter, const Theme& theme, bool faile
     const float stack = icon_box + (show_text ? 8.0f + 18.0f + (!hint.empty() ? 16.0f : 0.0f) : 0.0f);
     float y = absolute_.y + (absolute_.h - stack) * 0.5f;
     const Rect icon_r{absolute_.x + (absolute_.w - icon_box) * 0.5f, y, icon_box, icon_box};
-    painter.FillRoundedRect(icon_r, icon_box * 0.5f, theme.fill_hover);
+    painter.FillRoundedRect(icon_r, icon_box * 0.5f, failed ? theme.danger_subtle : theme.fill_hover);
     painter.DrawIcon(glyph, icon_r, std::max(14.0f, icon_box * 0.42f),
-                     failed ? theme.text : theme.text_secondary);
+                     failed ? theme.danger : theme.text_secondary);
     if (!show_text) return;
     y += icon_box + 8.0f;
     painter.DrawText(title, {absolute_.x + 12.0f, y, absolute_.w - 24.0f, 18.0f},

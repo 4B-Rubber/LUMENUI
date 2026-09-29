@@ -4,6 +4,7 @@
 #include "core/offscreen.h"
 #include "core/lumatext_bridge.h"
 #include "core/text_service.h"
+#include "core/pointer_click.h"
 #include "core/renderer.h"
 #include "core/menu_window.h"
 #include "control_usability.h"
@@ -23,6 +24,7 @@
 #include <span>
 #include <windows.h>
 #include <oleauto.h>
+#include <imm.h>
 #include <UIAutomation.h>
 #include <UIAutomationClient.h>
 
@@ -64,6 +66,8 @@ bool CloseTo(Color a, Color b, float tol = 0.06f) {
     return std::fabs(a.r - b.r) <= tol && std::fabs(a.g - b.g) <= tol &&
            std::fabs(a.b - b.b) <= tol && std::fabs(a.a - b.a) <= tol;
 }
+
+bool CloseTo(float a, float b, float tol) { return std::fabs(a - b) <= tol; }
 
 Color Over(Color top, Color bottom) {
     const float a = top.a;
@@ -172,6 +176,7 @@ struct TestList : ListView {
     using ListView::OnKey;
     using ListView::OnAnimate;
     using ListView::AutomationItemName;
+    bool ReorderSettling() const noexcept { return float_row_ >= 0; }
 };
 struct TestDirtyControl : Button {
     using Button::Button;
@@ -378,6 +383,10 @@ struct TestSpotlightCard : StackPanel {
 struct TestButton : Button {
     using Button::OnMouseUp;
     using Button::OnKey;
+    using Button::Measure;
+    using Button::Arrange;
+    using Button::Draw;
+    using Button::OnAnimate;
 };
 struct TestPanel : Panel {
     using Panel::Measure;
@@ -413,6 +422,12 @@ struct TestLog : LogView {
 struct TestRich : RichLabel {
     using RichLabel::Measure;
     using RichLabel::Arrange;
+    using RichLabel::OnMouseUp;
+    using RichLabel::OnMouseDown;
+    using RichLabel::OnMouseMove;
+    using RichLabel::OnMouseDoubleClick;
+    using RichLabel::Focusable;
+    using RichLabel::layout_;
 };
 
 constexpr uint32_t kBtnL = 0x0001;
@@ -596,6 +611,57 @@ void TestInteraction() {
         list.OnMouseMove({20.0f, 0.5f * rh}, kBtnL);
         list.OnMouseUp({20.0f, 0.5f * rh}, 0);
         Check(swiped == 0, "trailing swipe invokes view row");
+    }
+    {
+        // Drag reorder: lift past the slop, drop by row centre, Esc restores order.
+        TestRoot root;
+        auto& list = root.Add<TestList>();
+        list.ItemCount(6, false).CanReorder(true);
+        size_t moved_from = 99, moved_to = 99;
+        list.OnReordered([&](size_t from, size_t to) { moved_from = from; moved_to = to; });
+        root.Measure({300.0f, 400.0f}, theme);
+        root.Arrange({0.0f, 0.0f, 300.0f, 400.0f});
+        const float rh = theme.list_row_height;
+        list.OnMouseDown({80.0f, 0.5f * rh}, kBtnL);
+        list.OnMouseMove({80.0f, 0.5f * rh + 12.0f}, kBtnL);
+        list.OnMouseMove({80.0f, 3.4f * rh}, kBtnL);
+        list.OnAnimate(0.016f);
+        list.OnMouseUp({80.0f, 3.4f * rh}, 0);
+        Check(moved_from == 0 && moved_to == 3 && list.DataIndex(3) == 0 && list.DataIndex(0) == 1,
+              "drag reorder drops at the row under the lifted centre");
+        Check(list.ReorderSettling(), "dropped row springs into its slot");
+        for (int i = 0; i < 90; ++i) list.OnAnimate(0.016f);
+        Check(!list.ReorderSettling(), "drag reorder settle animation comes to rest");
+        moved_from = 99;
+        list.OnMouseDown({80.0f, 1.5f * rh}, kBtnL);
+        list.OnMouseMove({80.0f, 1.5f * rh + 12.0f}, kBtnL);
+        list.OnMouseMove({80.0f, 4.5f * rh}, kBtnL);
+        list.OnKey(VK_ESCAPE);
+        list.OnMouseUp({80.0f, 4.5f * rh}, 0);
+        Check(moved_from == 99 && list.DataIndex(3) == 0 && list.DataIndex(1) == 2,
+              "Esc cancels drag reorder without moving");
+        list.OnMouseDown({80.0f, 0.5f * rh}, kBtnL);
+        list.OnMouseMove({80.0f, 0.5f * rh + 12.0f}, kBtnL);
+        list.OnMouseMove({80.0f, 5.0f * rh + 40.0f}, kBtnL);   // far below the last row
+        list.OnMouseUp({80.0f, 5.0f * rh + 40.0f}, 0);
+        Check(moved_to == 5, "drag reorder past the end clamps to the last slot");
+    }
+    {
+        // Auto-scroll: holding the lifted row at the bottom edge scrolls and retargets.
+        TestRoot root;
+        auto& list = root.Add<TestList>();
+        list.ItemCount(200, false).CanReorder(true);
+        size_t moved_to = 0;
+        list.OnReordered([&](size_t, size_t to) { moved_to = to; });
+        root.Measure({300.0f, 200.0f}, theme);
+        root.Arrange({0.0f, 0.0f, 300.0f, 200.0f});
+        const float rh = theme.list_row_height;
+        list.OnMouseDown({80.0f, 0.5f * rh}, kBtnL);
+        list.OnMouseMove({80.0f, 0.5f * rh + 12.0f}, kBtnL);
+        list.OnMouseMove({80.0f, 198.0f}, kBtnL);
+        for (int i = 0; i < 30; ++i) list.OnAnimate(0.016f);
+        list.OnMouseUp({80.0f, 198.0f}, 0);
+        Check(moved_to > 10, "drag reorder auto-scrolls at the edge");
     }
     {
         TestRoot root;
@@ -1810,6 +1876,9 @@ struct TestRating : Rating {
 };
 struct TestSkeleton : Skeleton {
     using Skeleton::OnAnimate;
+    using Skeleton::Measure;
+    using Skeleton::Arrange;
+    using Skeleton::Draw;
 };
 struct TestTreeView : TreeView {
     using TreeView::OnKey;
@@ -1829,6 +1898,11 @@ struct TestSplitButton : SplitButton {
 struct TestTitleBar : TitleBar {
     using TitleBar::Measure;
     using TitleBar::Arrange;
+    using TitleBar::Draw;
+    using TitleBar::ButtonSlot;
+    using TitleBar::hover_;
+    using TitleBar::min_glow_;
+    using TitleBar::close_glow_;
 };
 struct TestDropDownButton : DropDownButton {
     using DropDownButton::DropDownButton;
@@ -2886,6 +2960,199 @@ void TestExtras() {
         }
     }
     {
+        // ShaderView：GPU 程序化光在控件局部坐标求值（窗口偏移 + 1.5x DPI 下仍以自身矩形为基准），
+        // 单色、不越出边界；无窗口/未播放时不申请持续动画。
+        OffscreenRenderer renderer;
+        if (!renderer.Init(300, 210)) {
+            Check(false, "shader view renderer");
+        } else {
+            struct TestShaderView : ShaderView {
+                using ShaderView::Arrange;
+                using ShaderView::Measure;
+                using ShaderView::OnAnimate;
+            };
+            auto render = [&](TestShaderView& view) {
+                ID2D1DeviceContext2* dc = renderer.BeginDraw();
+                Painter painter;
+                painter.BeginFrame(dc, &UiText(), 1.5f);
+                painter.FillRect({0.0f, 0.0f, 200.0f, 140.0f}, theme.bg);
+                DrawControlTree(painter, theme, &view);
+                painter.EndFrame();
+                return renderer.EndDraw();
+            };
+            TestShaderView view;
+            view.Kind(ShaderKind::Glow).Grain(0.0f).Intensity(1.0f).Time(1.0f).Height(100.0f);
+            view.Center({0.2f, 0.5f});
+            Check(view.Measure({160.0f, 400.0f}, theme).h == 100.0f, "shader view measures height");
+            view.Arrange({20.0f, 20.0f, 160.0f, 100.0f});   // 设备像素 (30,30)-(270,180)
+            Check(render(view), "shader view enddraw");
+            Check(view.GpuActive(), "shader view custom effect available");
+            Color left{}, right{}, outside{};
+            renderer.ReadPixel(30 + 48, 105, left);    // 光心：x = 0.2 * 240
+            renderer.ReadPixel(30 + 216, 105, right);
+            renderer.ReadPixel(20, 105, outside);
+            Check(left.r > theme.bg.r + 0.35f, "shader glow lights its local center");
+            Check(left.r > right.r + 0.2f, "shader evaluates in control-local coordinates");
+            Check(std::fabs(left.r - left.g) < 0.02f && std::fabs(left.r - left.b) < 0.02f,
+                  "shader output stays monochrome");
+            Check(CloseTo(outside, theme.bg), "shader does not paint outside its bounds");
+
+            view.Kind(ShaderKind::DotGrid).Center({0.5f, 0.5f}).CornerRadius(16.0f);
+            Check(render(view), "shader dotgrid enddraw");
+            float lo = 1.0f, hi = 0.0f;
+            for (int x = 40; x < 100; ++x) {
+                Color c{};
+                renderer.ReadPixel(x, 40, c);   // 点行中心：局部 10.5px = 半个 21px 间距
+                lo = std::min(lo, c.r);
+                hi = std::max(hi, c.r);
+            }
+            Check(hi - lo > 0.05f, "shader dotgrid draws a lattice");
+            Color corner{};
+            renderer.ReadPixel(31, 31, corner);
+            Check(CloseTo(corner, theme.bg), "shader view honors corner radius clip");
+
+            // 无窗口 / 暂停：OnAnimate 不续订，不形成空闲动画循环。
+            view.Play(ShaderPlay::Always);
+            Check(!view.OnAnimate(0.016f), "shader view without window does not tick");
+            view.Play(ShaderPlay::Paused);
+            Check(!view.OnAnimate(0.016f), "paused shader view does not tick");
+
+            // 可感知运动：每种效果 0.5 s 内的逐像素平均亮度变化（0..255），
+            // 相对画面平均亮度归一。只看自主动画，不含鼠标跟随。
+            view.Play(ShaderPlay::Paused).CornerRadius(0.0f).Grain(0.0f).Center({0.5f, 0.5f});
+            const ShaderKind kinds[] = {ShaderKind::Mist, ShaderKind::Glow, ShaderKind::DotGrid,
+                                        ShaderKind::Rays, ShaderKind::Flow, ShaderKind::Liquid};
+            const char* kind_names[] = {"mist", "glow", "dotgrid", "rays", "flow", "liquid"};
+            for (int k = 0; k < 6; ++k) {
+                view.Center(k == 3 ? Point{0.5f, -0.15f} : Point{0.5f, 0.5f});
+                std::vector<uint8_t> a, b;
+                view.Kind(kinds[k]).Time(10.0f);
+                const bool ok_a = render(view) && renderer.ReadBack(a);
+                view.Time(10.5f);
+                const bool ok_b = render(view) && renderer.ReadBack(b);
+                double diff = 0.0, mean = 0.0;
+                size_t n = 0;
+                for (int y = 30; y < 180; ++y) {
+                    for (int x = 30; x < 270; ++x) {
+                        const size_t i = (static_cast<size_t>(y) * 300 + static_cast<size_t>(x)) * 4;
+                        diff += std::fabs(static_cast<double>(a[i + 1]) - static_cast<double>(b[i + 1]));
+                        mean += static_cast<double>(a[i + 1]) - theme.bg.g * 255.0;
+                        ++n;
+                    }
+                }
+                diff /= static_cast<double>(n);
+                mean /= static_cast<double>(n);
+                std::printf("[INFO] shader %-7s motion 0.5s: mean|d|=%.2f mean=%.2f ratio=%.3f\n",
+                            kind_names[k], diff, mean, diff / std::max(1.0, mean));
+                Check(ok_a && ok_b, "shader motion frames render");
+                // 回归底线（改动前实测 mist 3.5 / dotgrid 0.4 / rays 3.0，用户反馈“要仔细看”）。
+                // Glow 的自主运动刻意保持含蓄，其动感来自跟随指针，不设底线。
+                const double floor_d[] = {8.0, 0.0, 3.0, 5.0, 4.0, 4.0};
+                if (floor_d[k] > 0.0) {
+                    char name[64];
+                    std::snprintf(name, sizeof(name), "shader %s motion is perceptible", kind_names[k]);
+                    Check(diff >= floor_d[k], name);
+                }
+            }
+
+            // 调色板：MeshGradient / LiquidMetal 默认单色（中性灰），Palette() 显式切彩色。
+            auto chroma = [](const std::vector<uint8_t>& px) {
+                double sum = 0.0;
+                size_t n = 0;
+                for (int y = 30; y < 180; y += 3) {
+                    for (int x = 30; x < 270; x += 3) {
+                        const size_t i = (static_cast<size_t>(y) * 300 + static_cast<size_t>(x)) * 4;
+                        const int hi = std::max({px[i], px[i + 1], px[i + 2]});
+                        const int lo = std::min({px[i], px[i + 1], px[i + 2]});
+                        sum += hi - lo;
+                        ++n;
+                    }
+                }
+                return n ? sum / static_cast<double>(n) : 0.0;
+            };
+            const ShaderKind color_kinds[] = {ShaderKind::MeshGradient, ShaderKind::LiquidMetal};
+            const char* color_names[] = {"mesh", "liquidmetal"};
+            for (int k = 0; k < 2; ++k) {
+                std::vector<uint8_t> mono, colored;
+                view.Kind(color_kinds[k]).Time(3.0f).Palette(ShaderPalette{});
+                const bool ok_mono = render(view) && renderer.ReadBack(mono);
+                view.Palette(ShaderPalette::Aurora());
+                const bool ok_color = render(view) && renderer.ReadBack(colored);
+                view.Palette(ShaderPalette{});
+                char name[80];
+                std::snprintf(name, sizeof(name), "shader %s palette frames render", color_names[k]);
+                Check(ok_mono && ok_color, name);
+                if (!ok_mono || !ok_color) continue;
+                const double c_mono = chroma(mono), c_color = chroma(colored);
+                std::printf("[INFO] shader %s chroma mono=%.2f aurora=%.2f\n", color_names[k], c_mono, c_color);
+                std::snprintf(name, sizeof(name), "shader %s defaults to monochrome", color_names[k]);
+                Check(c_mono < 4.0, name);
+                std::snprintf(name, sizeof(name), "shader %s palette is colored", color_names[k]);
+                Check(c_color > 12.0, name);
+            }
+            // 单色 Mist 套调色板后同样走色带。
+            {
+                std::vector<uint8_t> px;
+                view.Kind(ShaderKind::Mist).Time(3.0f).Palette(ShaderPalette::Ember());
+                const bool ok = render(view) && renderer.ReadBack(px);
+                view.Palette(ShaderPalette{});
+                Check(ok && chroma(px) > 4.0, "shader palette tints monochrome kinds");
+            }
+            renderer.Shutdown();
+        }
+    }
+    {
+        // RichLabel 多色：Colored 段绘成指定色，普通段保持中性。
+        OffscreenRenderer renderer;
+        if (!renderer.Init(300, 60)) {
+            Check(false, "richlabel color renderer");
+        } else {
+            TestRich rich;
+            rich.Add(L"MMMMMMMM").Colored(L"MMMMMMMM", Color{1.0f, 0.2f, 0.1f, 1.0f});
+            const Size sz = rich.Measure({280.0f, 60.0f}, theme);
+            rich.Arrange({10.0f, 10.0f, sz.w, sz.h});
+            std::vector<Rect> boxes;
+            rich.layout_.Selection(8, 8, boxes);
+            const float split = boxes.empty() ? 150.0f : 10.0f + boxes[0].x;
+            ID2D1DeviceContext2* dc = renderer.BeginDraw();
+            Painter painter;
+            painter.BeginFrame(dc, &UiText(), 1.0f);
+            painter.FillRect({0.0f, 0.0f, 300.0f, 60.0f}, theme.bg);
+            painter.SetBackdrop(theme.bg);
+            DrawControlTree(painter, theme, &rich);
+            painter.EndFrame();
+            Check(renderer.EndDraw(), "richlabel color enddraw");
+            std::vector<uint8_t> px;
+            Check(renderer.ReadBack(px), "richlabel color readback");
+            // 墨迹像素上的平均红色偏移（ClearType 彩边正负相抵，整段着色才显著偏正）。
+            double plain_sum = 0.0, colored_sum = 0.0;
+            int plain_n = 0, colored_n = 0;
+            for (int y = 10; y < 10 + static_cast<int>(sz.h); ++y) {
+                for (int x = 10; x < 10 + static_cast<int>(sz.w) && x < 300; ++x) {
+                    const size_t i = (static_cast<size_t>(y) * 300 + static_cast<size_t>(x)) * 4;
+                    if (i + 2 >= px.size()) continue;
+                    const int b = px[i], g = px[i + 1], r = px[i + 2];   // BGRA
+                    if (std::max({r, g, b}) < 80) continue;
+                    const double excess = r - 0.5 * (g + b);
+                    if (static_cast<float>(x) < split - 2.0f) {
+                        plain_sum += excess;
+                        ++plain_n;
+                    } else if (static_cast<float>(x) > split + 2.0f) {
+                        colored_sum += excess;
+                        ++colored_n;
+                    }
+                }
+            }
+            const double plain_red = plain_n ? plain_sum / plain_n : 0.0;
+            const double colored_red = colored_n ? colored_sum / colored_n : 0.0;
+            std::printf("[INFO] richlabel color plain_red=%.1f (%d px) colored_red=%.1f (%d px)\n",
+                        plain_red, plain_n, colored_red, colored_n);
+            Check(plain_n > 20 && std::fabs(plain_red) < 8.0, "richlabel plain run stays neutral");
+            Check(colored_n > 20 && colored_red > 60.0, "richlabel colored run paints its color");
+            renderer.Shutdown();
+        }
+    }
+    {
         // Dialog：额外子级排在换行正文之下、页脚按钮之上，不得与说明文字重叠。
         TestDialog dialog;
         const std::wstring message =
@@ -2978,10 +3245,75 @@ void TestExtras() {
         Check(!log.Following(), "logview pauses follow on scroll up");
     }
     {
+        // RichLabel 基于 TextLayout：左对齐收拢到内容宽，居中占满；无约束 = 单行自然宽。
         TestRich rich;
         rich.Add(L"used ").Strong(L"85%").Secondary(L" of space");
         const Size sz = rich.Measure({200.0f, 400.0f}, theme);
-        Check(sz.h >= 16.0f && sz.w == 200.0f, "richlabel measures wrap width");
+        Check(sz.h >= 16.0f && sz.w > 40.0f && sz.w <= 200.0f, "richlabel measures within wrap width");
+        const Size natural = rich.Measure({kUnbounded, kUnbounded}, theme);
+        Check(std::fabs(natural.w - sz.w) < 1.0f, "richlabel short text keeps natural width");
+        TestRich centered;
+        centered.Add(L"used 85%").Alignment(Align::Center);
+        Check(centered.Measure({200.0f, 400.0f}, theme).w == 200.0f, "richlabel centered fills width");
+        TestRich empty;
+        Check(empty.Measure({200.0f, 400.0f}, theme).w == 0.0f, "empty richlabel has no width");
+    }
+    {
+        // 无空格中日韩文本必须在宽度内换行（旧实现按空格分词，整段溢出）。
+        std::wstring cjk;
+        for (int i = 0; i < 40; ++i) cjk += static_cast<wchar_t>(0x4E00 + i * 7);
+        TestRich rich;
+        rich.Add(cjk.substr(0, 20)).Strong(cjk.substr(20));
+        const Size one = rich.Measure({kUnbounded, kUnbounded}, theme);
+        const Size sz = rich.Measure({120.0f, 800.0f}, theme);
+        Check(sz.w <= 120.0f && sz.h > one.h * 3.0f, "richlabel wraps CJK without spaces");
+        rich.Arrange({0.0f, 0.0f, sz.w, sz.h});
+        Check(rich.layout_.ContentSize().w <= 120.5f, "richlabel CJK lines stay inside width");
+    }
+    {
+        // 行内标记 + 链接回调 + 双击选词。
+        TestRich md;
+        md.Markup(L"a **bold** *it* `code` [link](target) \\*x");
+        Check(md.Text() == L"a bold it code link *x", "richlabel markup strips syntax");
+        std::wstring target;
+        md.OnLink([&target](std::wstring_view t) { target = std::wstring(t); });
+        const Size sz = md.Measure({600.0f, 200.0f}, theme);
+        md.Arrange({0.0f, 0.0f, sz.w, sz.h});
+        std::vector<Rect> boxes;
+        md.layout_.Selection(15, 4, boxes);   // "link"
+        Check(!boxes.empty(), "richlabel link has hit boxes");
+        if (!boxes.empty()) {
+            md.OnMouseUp({boxes[0].x + boxes[0].w * 0.5f, boxes[0].y + boxes[0].h * 0.5f}, kBtnL);
+        }
+        Check(target == L"target", "richlabel markup link reports target");
+        Check(!md.Focusable(), "richlabel not focusable unless selectable");
+        md.Selectable(true);
+        Check(md.Focusable(), "selectable richlabel is focusable");
+        md.layout_.Selection(2, 4, boxes);    // "bold"
+        if (!boxes.empty()) md.OnMouseDoubleClick({boxes[0].x + 2.0f, boxes[0].y + boxes[0].h * 0.5f});
+        Check(md.SelectedText() == L"bold", "richlabel double click selects word");
+        Check(md.AutomationName() == L"a bold it code link *x", "richlabel automation name is plain text");
+    }
+    {
+        // 多段：\n 硬换行成多行，一次拖选可从末行拖到控件上方，跨行选中全部。
+        TestRich multi;
+        multi.Add(L"first line").Add(L"\n").Strong(L"second").Add(L"\n").Markup(L"third `code`");
+        multi.Selectable(true);
+        const Size sz = multi.Measure({400.0f, 400.0f}, theme);
+        multi.Arrange({0.0f, 0.0f, sz.w, sz.h});
+        Check(multi.layout_.Lines().size() == 3, "richlabel newline makes hard lines");
+        std::vector<Rect> boxes;
+        multi.layout_.Selection(multi.Text().size() - 1, 1, boxes);
+        if (!boxes.empty()) {
+            const Rect last = boxes.back();
+            multi.OnMouseDown({last.Right() + 20.0f, last.y + last.h * 0.5f}, kBtnL);
+            multi.OnMouseMove({sz.w * 0.5f, sz.h * 0.5f}, kBtnL);
+            Check(multi.HasSelection() && multi.SelectedText().find(L"\n") != std::wstring::npos,
+                  "richlabel drag selects across lines");
+            multi.OnMouseMove({-10.0f, -30.0f}, kBtnL);   // 拖出控件上方：选到开头
+            multi.OnMouseUp({-10.0f, -30.0f}, kBtnL);
+        }
+        Check(multi.SelectedText() == L"first line\nsecond\nthird code", "richlabel drag above selects to start");
     }
     {
         Window window(L"batch2-overlay", {240.0f, 160.0f});
@@ -3102,7 +3434,9 @@ void TestExtras() {
             for (int x = 20; x < 210; ++x) {
                 for (int y = 40; y < 150; ++y) {
                     renderer.ReadPixel(x, y, ink);
-                    if (ink.r > theme.bg.r + 0.04f) ++hits;
+                    // 类别色系列（默认 cyan）按亮度判断，不只看红通道。
+                    const float luma = 0.2126f * ink.r + 0.7152f * ink.g + 0.0722f * ink.b;
+                    if (luma > theme.bg.r + 0.04f) ++hits;
                 }
             }
             Check(hits > 40, "chart area fill brighter than backdrop");
@@ -3132,7 +3466,7 @@ void TestExtras() {
             for (int x = 20; x < 140; ++x) {
                 for (int y = 20; y < 160; ++y) {
                     renderer.ReadPixel(x, y, ink);
-                    if (ink.r > 0.12f) ++hits;
+                    if (std::max(ink.r, std::max(ink.g, ink.b)) > 0.12f) ++hits;
                 }
             }
             Check(hits > 30, "chart donut paints ring");
@@ -3161,7 +3495,8 @@ void TestExtras() {
             Color hi{}, lo{};
             renderer.ReadPixel(24, 22, hi);
             renderer.ReadPixel(52, 22, lo);
-            Check(hi.r > lo.r + 0.05f, "chart heatmap high cell brighter than low");
+            const auto luma = [](Color c) { return 0.2126f * c.r + 0.7152f * c.g + 0.0722f * c.b; };
+            Check(luma(hi) > luma(lo) + 0.05f, "chart heatmap high cell brighter than low");
             renderer.Shutdown();
         }
     }
@@ -4434,6 +4769,7 @@ void RenderScene(const wchar_t* path) {
         // 采左上内边（避开居中 CJK 字墨），圆角半径内仍是 danger 填充。
         renderer.ReadPixel(static_cast<int>(b.x + 12.0f), static_cast<int>(b.y + 10.0f), c);
         Check(CloseTo(c, theme.danger), "danger button center");
+        Check(c.r > c.g + 0.30f && c.r > c.b + 0.30f, "danger button uses red status color");
     }
     if (scene.checked_box) {
         const Rect b = scene.checked_box->AbsoluteBounds();
@@ -4609,12 +4945,12 @@ void RenderExtrasScene(const wchar_t* path) {
     };
 
     Color c{};
-    // 骨架首行：呼吸相位 0 → 0.72 倍 fill_hover 合成
+    // 骨架首行：呼吸相位 0 → fill_hover 与 fill_selected 的中点；扫光此时停在左侧界外。
     const Rect sk = skeleton->AbsoluteBounds();
     read_pixel(static_cast<int>(sk.x + sk.w * 0.5f), static_cast<int>(sk.y + 3.0f), c);
     Color expected = theme.fill_hover;
-    expected.a *= 0.72f;
-    Check(CloseTo(c, Over(expected, theme.bg)), "skeleton breathing fill");
+    expected.a = (theme.fill_hover.a + theme.fill_selected.a) * 0.5f;
+    Check(CloseTo(c, Over(expected, theme.bg), 0.02f), "skeleton breathing fill");
 
     // 星级：填充星中心亮于未填充描边星中心
     const Rect rt = rating->AbsoluteBounds();
@@ -4629,7 +4965,7 @@ void RenderExtrasScene(const wchar_t* path) {
     read_pixel(static_cast<int>(av.x + 10.0f), static_cast<int>(av.y + 8.0f), c);
     Check(CloseTo(c, Over(theme.fill_input_hover, theme.bg)), "avatar circle fill");
     read_pixel(static_cast<int>(av.x + 28.76f), static_cast<int>(av.y + 28.76f), c);
-    Check(c.r > theme.fill_input_hover.r + 0.3f, "avatar presence dot lit");
+    Check(c.g > theme.fill_input_hover.g + 0.3f && c.g > c.r + 0.3f, "avatar online presence dot green");
 
     // InfoBadge 圆点：accent 实心（白），避免采到计数胶囊上的黑字。
     {
@@ -4924,6 +5260,29 @@ void TestDefaultChrome() {
     Check(ink > 8, "default chrome title bar caption brightness");
     renderer.Shutdown();
 
+    // CaptionVisible(false)：标题区收起为 0，Root 从客户区顶端开始；恢复后回到原高度。
+    // 仅 TitleBar::Visible(false) 仍保留 40 DIP 拖动区（既有语义不变）。
+    Check(window.CaptionVisible(), "caption visible by default");
+    const float with_caption = window.MeasureContent(400.0f).h;
+    const float caption_h = bar ? bar->Height() : 0.0f;
+    window.CaptionVisible(false);
+    window.LayoutNow();
+    Check(!window.CaptionVisible() && bar && !bar->Visible() &&
+              Near(window.MeasureContent(400.0f).h, with_caption - caption_h) &&
+              Near(window.Root().AbsoluteBounds().y, 0.0f),
+          "CaptionVisible(false) collapses caption to 0");
+    window.CaptionVisible(true);
+    window.LayoutNow();
+    Check(window.CaptionVisible() && bar && bar->Visible() &&
+              Near(window.MeasureContent(400.0f).h, with_caption) &&
+              Near(window.Root().AbsoluteBounds().y, caption_h),
+          "CaptionVisible(true) restores caption height");
+    if (bar) bar->Visible(false);
+    window.LayoutNow();
+    Check(Near(window.MeasureContent(400.0f).h, with_caption),
+          "hidden TitleBar alone keeps caption strip");
+    if (bar) bar->Visible(true);
+
     Window system(L"system-chrome", {320.0f, 200.0f});
     Check(system.TitleBar() == nullptr, "three-arg Window keeps System frame");
     Check(system.Backdrop() == Backdrop::None, "three-arg Window keeps Backdrop::None");
@@ -5171,6 +5530,400 @@ void TestTableHeaderCheck() {
     Check(pixel(73, row_y) != pixel(74, row_y), "frozen divider remains between data columns");
 }
 
+// 特殊状态色板：成功/警告徽标、Critical 信息条、Busy 头像点须带各自色相，而不是灰阶。
+void TestStatusColors() {
+    OffscreenRenderer renderer;
+    if (!renderer.Init(480, 200)) {
+        Check(false, "renderer init (status colors)");
+        return;
+    }
+    const Theme theme = MakeTheme();
+    TestRoot root;
+    root.Padding(16.0f, 16.0f).Spacing(16.0f);
+    auto& row = root.Add<Row>().Spacing(16.0f).AlignCross(StackPanel::CrossAlign::Center);
+    Badge* ok = &row.Add<Badge>(L"Stable", Badge::BadgeTone::Success);
+    Badge* warn = &row.Add<Badge>(L"Beta", Badge::BadgeTone::Warning);
+    Badge* neutral = &row.Add<Badge>(L"Draft", Badge::BadgeTone::Neutral);
+    Avatar* busy = &row.Add<Avatar>();
+    busy->PresenceState(Avatar::Presence::Busy);
+    InfoBar* critical = &root.Add<InfoBar>(L"Critical");
+    critical->Message(L"Status colors").Tone(InfoBar::InfoTone::Critical).Closable(false);
+    root.Measure({480.0f, 200.0f}, theme);
+    root.Arrange({0.0f, 0.0f, 480.0f, 200.0f});
+
+    ID2D1DeviceContext2* dc = renderer.BeginDraw();
+    Painter painter;
+    painter.BeginFrame(dc, &UiText(), 1.0f);
+    painter.FillRect({0, 0, 480, 200}, theme.bg);
+    DrawControlTree(painter, theme, &root);
+    painter.EndFrame();
+    Check(renderer.EndDraw(), "enddraw (status colors)");
+    Check(renderer.SavePNG(L"lumen_visual_status.png"), "save status color png");
+    std::vector<uint8_t> snapshot;
+    Check(renderer.ReadBack(snapshot), "readback (status colors)");
+    const auto read_pixel = [&](float x, float y) {
+        Color out{};
+        const int ix = static_cast<int>(x);
+        const int iy = static_cast<int>(y);
+        if (ix < 0 || iy < 0 || ix >= renderer.Width() || iy >= renderer.Height() ||
+            snapshot.size() != static_cast<size_t>(renderer.Width()) * renderer.Height() * 4) {
+            return out;
+        }
+        const uint8_t* px = snapshot.data() + (static_cast<size_t>(iy) * renderer.Width() + ix) * 4;
+        return Color{px[2] / 255.0f, px[1] / 255.0f, px[0] / 255.0f, px[3] / 255.0f};
+    };
+    // 徽标左内边（避开居中文字）：状态底为同色 14% 合成到黑底。
+    const Rect okb = ok->AbsoluteBounds();
+    Color c = read_pixel(okb.x + 5.0f, okb.y + okb.h * 0.5f);
+    Check(CloseTo(c, Over(theme.success_subtle, theme.bg), 0.03f) && c.g > c.r + 0.04f,
+          "success badge tinted green");
+    const Rect wb = warn->AbsoluteBounds();
+    c = read_pixel(wb.x + 5.0f, wb.y + wb.h * 0.5f);
+    Check(CloseTo(c, Over(theme.warning_subtle, theme.bg), 0.03f) && c.r > c.b + 0.08f,
+          "warning badge tinted amber");
+    const Rect nb = neutral->AbsoluteBounds();
+    c = read_pixel(nb.x + 5.0f, nb.y + nb.h * 0.5f);
+    Check(std::fabs(c.r - c.g) < 0.01f && std::fabs(c.g - c.b) < 0.01f, "neutral badge stays gray");
+    // 默认 32 DIP 头像：状态点中心与 extras 场景同一偏移。
+    const Rect av = busy->AbsoluteBounds();
+    c = read_pixel(av.x + 28.76f, av.y + 28.76f);
+    Check(c.r > c.g + 0.3f && c.r > c.b + 0.3f, "avatar busy presence dot red");
+    // Critical 字形井左上内角：danger_subtle 叠在碳底上，偏红。
+    const Rect ib = critical->AbsoluteBounds();
+    const float glyph_y = ib.y + (ib.h - 32.0f) * 0.5f;
+    c = read_pixel(ib.x + 14.0f + 5.0f, glyph_y + 5.0f);
+    Check(c.r > c.g + 0.05f && c.r > c.b + 0.05f, "critical info bar glyph well tinted red");
+
+    // 标题栏：关闭钮悬停为 danger_pressed 深红底；最小化悬停保持中性灰。
+    OffscreenRenderer caption;
+    if (!caption.Init(480, 40)) {
+        Check(false, "renderer init (title bar close hover)");
+        return;
+    }
+    TestTitleBar bar;
+    bar.Title(L"LUMEN");
+    bar.Measure({480.0f, 40.0f}, theme);
+    bar.Arrange({0.0f, 0.0f, 480.0f, 40.0f});
+    bar.hover_ = TitleBar::Region::Close;
+    bar.close_glow_ = 1.0f;
+    bar.min_glow_ = 1.0f;
+    ID2D1DeviceContext2* cdc = caption.BeginDraw();
+    Painter caption_painter;
+    caption_painter.BeginFrame(cdc, &UiText(), 1.0f);
+    caption_painter.FillRect({0, 0, 480, 40}, theme.bg);
+    bar.Draw(caption_painter, theme);
+    caption_painter.EndFrame();
+    Check(caption.EndDraw(), "enddraw (title bar close hover)");
+    Check(caption.SavePNG(L"lumen_visual_caption.png"), "save title bar close hover png");
+    std::vector<uint8_t> caption_px;
+    Check(caption.ReadBack(caption_px), "readback (title bar close hover)");
+    const auto caption_pixel = [&](const Rect& slot) {
+        const int ix = static_cast<int>(slot.x + 4.0f);
+        const int iy = static_cast<int>(slot.y + 4.0f);
+        if (slot.IsEmpty() || caption_px.size() != 480u * 40u * 4u || ix < 0 || ix >= 480 || iy < 0 ||
+            iy >= 40) {
+            return Color{};
+        }
+        const uint8_t* px = caption_px.data() + (static_cast<size_t>(iy) * 480u + ix) * 4u;
+        return Color{px[2] / 255.0f, px[1] / 255.0f, px[0] / 255.0f, px[3] / 255.0f};
+    };
+    c = caption_pixel(bar.ButtonSlot(TitleBar::Region::Close));
+    Check(CloseTo(c, theme.danger_pressed, 0.03f), "title bar close hover uses danger fill");
+    c = caption_pixel(bar.ButtonSlot(TitleBar::Region::Min));
+    Check(CloseTo(c, Over(theme.fill_hover, theme.bg), 0.02f), "title bar minimize hover stays neutral");
+}
+
+// 骨架动画须肉眼可见：呼吸相位间底色有可辨亮度差，扫光经过处明显亮于两端。
+void TestSkeletonMotion() {
+    OffscreenRenderer renderer;
+    if (!renderer.Init(200, 24)) {
+        Check(false, "renderer init (skeleton motion)");
+        return;
+    }
+    const Theme theme = MakeTheme();
+    TestSkeleton skeleton;
+    skeleton.Measure({200.0f, 24.0f}, theme);
+    skeleton.Arrange({20.0f, 6.0f, 160.0f, 12.0f});
+    const auto render = [&](float& edge, float& center) {
+        ID2D1DeviceContext2* dc = renderer.BeginDraw();
+        Painter painter;
+        painter.BeginFrame(dc, &UiText(), 1.0f);
+        painter.FillRect({0, 0, 200, 24}, theme.bg);
+        skeleton.Draw(painter, theme);
+        painter.EndFrame();
+        Check(renderer.EndDraw(), "enddraw (skeleton motion)");
+        std::vector<uint8_t> px;
+        Check(renderer.ReadBack(px), "readback (skeleton motion)");
+        const auto at = [&](int x) { return px.size() == 200u * 24u * 4u ? px[(12u * 200u + x) * 4u + 1u] / 255.0f : 0.0f; };
+        edge = at(30);
+        center = at(100);
+    };
+    float edge0 = 0.0f, center0 = 0.0f, edge1 = 0.0f, center1 = 0.0f;
+    render(edge0, center0);
+    // 1.4 rad/s：约 1.122 s 到呼吸峰值（sin=1），此时扫光正好在横向中点。
+    skeleton.OnAnimate(1.1220f);
+    render(edge1, center1);
+    Check(edge1 > edge0 + 0.02f, "skeleton breathing changes visibly");
+    Check(center1 > edge1 + 0.04f, "skeleton light sweep brightens the passing band");
+}
+
+// 布局契约：无约束测量返回自然尺寸、Row 收缩换行文字、Grid/ScrollViewer/WrapPanel 不溢出。
+struct LayoutRow : StackPanel {
+    LayoutRow() : StackPanel(Orientation::Horizontal) {}
+    using StackPanel::Measure;
+    using StackPanel::Arrange;
+};
+struct LayoutGrid : Grid {
+    LayoutGrid() : Grid(2) {}
+    using Grid::Measure;
+    using Grid::Arrange;
+};
+struct LayoutWrap : WrapPanel {
+    using WrapPanel::Measure;
+    using WrapPanel::Arrange;
+};
+struct LayoutLabel : Label {
+    using Label::Label;
+    using Label::Measure;
+};
+struct FixedBlock : Control {
+    Size size;
+    explicit FixedBlock(Size s) : size(s) {}
+    Size Measure(Size, const Theme&) override { return size; }
+    void Draw(Painter&, const Theme&) override {}
+};
+
+void TestLayoutContract() {
+    const Theme theme = MakeTheme();
+    const wchar_t* kLong =
+        L"Glow intensity scales every accent halo in the window. Lower it for dense tool panels, "
+        L"raise it for showcase pages and splash screens where the light should carry the mood.";
+    {   // 1. 无约束测量契约：Row 首测给的 kUnbounded 不得被原样当期望宽度返回。
+        LayoutRow row;
+        row.Add<Label>(kLong).Wrap(true);
+        row.Add<Expander>(L"Advanced options").Add<Button>(L"Inner");
+        row.Add<InfoBar>(L"Saved").Message(kLong);
+        row.Add<TextBox>();
+        row.Add<Button>(L"OK");
+        const Size d = row.Measure({kUnbounded, kUnbounded}, theme);
+        bool all_natural = true;
+        for (size_t i = 0; i < row.ChildCount(); ++i) {
+            if (row.Child(i).DesiredSize().w >= 1.0e4f) all_natural = false;
+        }
+        Check(all_natural, "layout: controls return natural width on unbounded axis");
+        Check(d.w < 1.0e4f, "layout: row of greedy controls stays finite when unbounded");
+    }
+    {   // 2. Row 中换行 Label + 按钮：文字在剩余宽度内折行，按钮保持自然宽且不溢出。
+        TestRoot root;
+        auto& row = root.Add<Row>();
+        row.Spacing(8.0f);
+        auto& text = row.Add<Label>(kLong);
+        text.Wrap(true);
+        auto& button = row.Add<Button>(L"Apply");
+        LayoutRow probe;
+        auto& lone = probe.Add<Button>(L"Apply");
+        probe.Measure({kUnbounded, kUnbounded}, theme);
+        const float button_natural = lone.DesiredSize().w;
+        root.Measure({420.0f, kUnbounded}, theme);
+        root.Arrange({0.0f, 0.0f, 420.0f, 600.0f});
+        const Rect t = text.AbsoluteBounds();
+        const Rect b = button.AbsoluteBounds();
+        Check(root.DesiredSize().w <= 420.5f, "layout: row with wrap label does not widen parent");
+        Check(t.Right() <= b.x + 0.5f && b.Right() <= 420.5f, "layout: wrap label and button share row width");
+        Check(CloseTo(b.w, button_natural, 0.5f), "layout: button keeps natural width in shrunk row");
+        Check(t.h > 30.0f, "layout: wrap label in row wraps to multiple lines");
+    }
+    {   // 3. 换行 Label 期望宽度：左对齐取内容宽，居中占满可用宽。
+        LayoutLabel leading(L"Short text");
+        leading.Wrap(true);
+        LayoutLabel centered(L"Short text");
+        centered.Wrap(true).Alignment(Align::Center);
+        Check(leading.Measure({400.0f, kUnbounded}, theme).w < 200.0f, "layout: leading wrap label hugs content");
+        Check(CloseTo(centered.Measure({400.0f, kUnbounded}, theme).w, 400.0f, 0.5f),
+              "layout: centered wrap label keeps full width");
+    }
+    {   // 4. Grid 在无约束宽度下 Arrange：fr 列退回内容宽，单元格不重叠。
+        LayoutGrid grid;
+        auto& a = grid.Add<Button>(L"Left cell");
+        auto& c = grid.Add<Button>(L"Right cell");
+        grid.Measure({kUnbounded, kUnbounded}, theme);
+        grid.Arrange({0.0f, 0.0f, kUnbounded, 200.0f});
+        Check(a.AbsoluteBounds().w > 20.0f && c.AbsoluteBounds().w > 20.0f,
+              "layout: grid fr columns non-zero when unbounded");
+        Check(c.AbsoluteBounds().x >= a.AbsoluteBounds().Right() - 0.5f,
+              "layout: grid cells do not overlap when unbounded");
+    }
+    {   // 5. 纵向 ScrollViewer：内容宽恒等于视口宽；原始 bug 场景（Row+换行文字+Grid）。
+        TestScrollViewer viewer;
+        auto& page = viewer.Add<Column>();
+        page.Add<FixedBlock>(Size{2000.0f, 40.0f});
+        auto& row = page.Add<Row>();
+        row.Add<Label>(kLong).Wrap(true);
+        row.Add<Button>(L"Go");
+        auto& grid = page.Add<Grid>(2);
+        auto& left = grid.Add<Button>(L"A");
+        auto& right = grid.Add<Button>(L"B");
+        viewer.Measure({600.0f, 400.0f}, theme);
+        viewer.Arrange({0.0f, 0.0f, 600.0f, 400.0f});
+        Check(page.AbsoluteBounds().w <= 600.5f, "layout: vertical scroll viewer clamps content width");
+        Check(left.AbsoluteBounds().w > 200.0f && right.AbsoluteBounds().x > 250.0f &&
+                  right.AbsoluteBounds().Right() <= 600.5f,
+              "layout: grid below wrap-label row splits viewport width");
+    }
+    {   // 6. WrapPanel：超长项按行宽约束，不撑破容器；短项保持自然宽。
+        LayoutWrap wrap;
+        auto& chip = wrap.Add<Button>(L"Chip");
+        auto& text = wrap.Add<Label>(kLong);
+        text.Wrap(true);
+        const Size d = wrap.Measure({300.0f, kUnbounded}, theme);
+        wrap.Arrange({0.0f, 0.0f, 300.0f, d.h});
+        Check(text.AbsoluteBounds().Right() <= 300.5f && text.AbsoluteBounds().h > 30.0f,
+              "layout: wrap panel constrains long item to line width");
+        Check(chip.AbsoluteBounds().w < 150.0f, "layout: wrap panel keeps short item natural");
+    }
+    {   // 7. StackPanel 非 Stretch 交叉轴不超出容器。
+        TestRoot root;
+        root.AlignCross(CrossAlign::Center);
+        auto& wide = root.Add<FixedBlock>(Size{2000.0f, 40.0f});
+        root.Measure({300.0f, kUnbounded}, theme);
+        root.Arrange({0.0f, 0.0f, 300.0f, 200.0f});
+        Check(wide.AbsoluteBounds().x >= -0.5f && wide.AbsoluteBounds().Right() <= 300.5f,
+              "layout: non-stretch cross extent clamped to container");
+    }
+}
+
+// 图表类别色 / 光色温 / 语义瞬时光（Button::Flash、FormField 错误柔光）。
+void TestColorLight() {
+    {
+        const Theme neutral = MakeTheme(1.0f);
+        const Theme cool = MakeTheme(1.0f, LightTone::Cool);
+        const Theme warm = MakeTheme(1.0f, LightTone::Warm);
+        Check(neutral.glow_sm.r == 1.0f && neutral.glow_sm.b == 1.0f, "neutral light tone stays white");
+        Check(cool.glow_sm.b > cool.glow_sm.r + 0.08f && cool.spotlight_fill.b > cool.spotlight_fill.r,
+              "cool light tone tints glow tokens blue");
+        Check(warm.glow_sm.r > warm.glow_sm.b + 0.08f && warm.specular_line.r > warm.specular_line.b,
+              "warm light tone tints glow tokens amber");
+        Check(CloseTo(cool.glow_sm.a, neutral.glow_sm.a, 0.001f), "light tone keeps glow alpha");
+        Check(CloseTo(cool.text.b, neutral.text.b, 0.001f) && CloseTo(warm.accent.b, neutral.accent.b, 0.001f),
+              "light tone leaves text and accent untouched");
+        Check(cool.light_tone == LightTone::Cool, "theme records light tone");
+        const Color s0 = ChartSeriesColor(neutral, 0);
+        const Color s6 = ChartSeriesColor(neutral, kChartSeriesCount);
+        Check(CloseTo(s6.g, s0.g * 0.72f, 0.01f), "chart palette cycles darker after six series");
+        Check(StatusColor(neutral, StatusTone::Danger).r == neutral.danger.r &&
+                  StatusColor(neutral, StatusTone::Success).g == neutral.success.g,
+              "status tone maps to theme status colours");
+    }
+    const Theme theme = MakeTheme();
+    const auto chroma = [](Color c) {
+        return std::max(c.r, std::max(c.g, c.b)) - std::min(c.r, std::min(c.g, c.b));
+    };
+    {
+        OffscreenRenderer renderer;
+        if (!renderer.Init(240, 180)) {
+            Check(false, "chart palette renderer");
+        } else {
+            TestChart chart;
+            chart.Kind(ChartKind::Donut)
+                .Slices({{L"A", 0.5f}, {L"B", 0.5f}})
+                .PreferredSize({220.0f, 160.0f});
+            chart.Measure({220.0f, 160.0f}, theme);
+            chart.Arrange({8.0f, 8.0f, 220.0f, 160.0f});
+            const auto count_chromatic = [&]() {
+                ID2D1DeviceContext2* dc = renderer.BeginDraw();
+                Painter painter;
+                painter.BeginFrame(dc, &UiText(), 1.0f);
+                painter.FillRect({0.0f, 0.0f, 240.0f, 180.0f}, theme.bg);
+                DrawControlTree(painter, theme, &chart);
+                painter.EndFrame();
+                Check(renderer.EndDraw(), "chart palette enddraw");
+                int hits = 0;
+                Color ink{};
+                for (int x = 10; x < 230; x += 2) {
+                    for (int y = 10; y < 170; y += 2) {
+                        renderer.ReadPixel(x, y, ink);
+                        if (chroma(ink) > 0.25f) ++hits;
+                    }
+                }
+                return hits;
+            };
+            const int colored = count_chromatic();
+            chart.Monochrome(true);
+            const int mono = count_chromatic();
+            Check(colored > 60, "chart donut slices use category colours");
+            Check(mono * 10 < colored, "chart Monochrome returns to grey ramp");
+            renderer.Shutdown();
+        }
+    }
+    {
+        OffscreenRenderer renderer;
+        if (!renderer.Init(160, 80)) {
+            Check(false, "button flash renderer");
+        } else {
+            TestButton button;
+            button.Text(L"Save");
+            button.Measure({160.0f, 80.0f}, theme);
+            button.Arrange({30.0f, 20.0f, 100.0f, 40.0f});
+            const auto edge = [&]() {
+                ID2D1DeviceContext2* dc = renderer.BeginDraw();
+                Painter painter;
+                painter.BeginFrame(dc, &UiText(), 1.0f);
+                painter.FillRect({0.0f, 0.0f, 160.0f, 80.0f}, theme.bg);
+                button.Draw(painter, theme);
+                painter.EndFrame();
+                Check(renderer.EndDraw(), "button flash enddraw");
+                Color ink{};
+                renderer.ReadPixel(25, 40, ink);
+                return ink;
+            };
+            const Color rest = edge();
+            button.Flash(StatusTone::Success);
+            Check(CloseTo(button.FlashLevel(), 1.0f, 0.001f), "button flash starts at full");
+            const Color lit = edge();
+            Check(lit.g > lit.r + 0.05f && lit.g > rest.g + 0.05f, "button flash glows in success green");
+            button.OnAnimate(0.5f);
+            Check(button.FlashLevel() > 0.1f && button.FlashLevel() < 0.5f, "button flash decays");
+            for (int i = 0; i < 20; ++i) button.OnAnimate(0.1f);
+            Check(button.FlashLevel() == 0.0f, "button flash settles to zero");
+            const Color done = edge();
+            Check(CloseTo(done.g, rest.g, 0.01f), "button flash leaves no residue");
+            renderer.Shutdown();
+        }
+    }
+    {
+        OffscreenRenderer renderer;
+        if (!renderer.Init(320, 140)) {
+            Check(false, "form error glow renderer");
+        } else {
+            TestRoot root;
+            auto& field = root.Add<TestFormField>(L"Name");
+            auto& box = field.Add<TextBox>();
+            box.Text(L"x");
+            const auto redness = [&]() {
+                root.Measure({260.0f, 2000.0f}, theme);
+                root.Arrange({30.0f, 10.0f, 260.0f, 120.0f});
+                ID2D1DeviceContext2* dc = renderer.BeginDraw();
+                Painter painter;
+                painter.BeginFrame(dc, &UiText(), 1.0f);
+                painter.FillRect({0.0f, 0.0f, 320.0f, 140.0f}, theme.bg);
+                DrawControlTree(painter, theme, &root);
+                painter.EndFrame();
+                Check(renderer.EndDraw(), "form error glow enddraw");
+                const Rect in = box.AbsoluteBounds();
+                Color ink{};
+                renderer.ReadPixel(static_cast<int>(in.x) - 3, static_cast<int>(in.y + in.h * 0.5f), ink);
+                return ink.r - ink.g;
+            };
+            const float calm = redness();
+            field.Error(L"Name is required");
+            const float broken = redness();
+            Check(calm < 0.01f, "form field without error has no red halo");
+            Check(broken > 0.03f, "form field error adds danger glow around input");
+            renderer.Shutdown();
+        }
+    }
+}
+
 void TestStructuredLogView() {
     std::vector<LogEntry> rows{
         {L"17:00:00.165", LogLevel::Info, L"worker", L"Order matched id=2913 px=341.50", L"trace=alpha"},
@@ -5222,10 +5975,16 @@ void TestStructuredLogView() {
         Check(target.EndDraw() && target.SavePNG(path), "save structured log scene");
         std::vector<uint8_t> pixels;
         Check(target.ReadBack(pixels), "structured log pixels");
-        bool monochrome = true;
-        for (size_t i = 0; i + 3 < pixels.size(); i += 4)
-            if (pixels[i] != pixels[i + 1] || pixels[i] != pixels[i + 2]) { monochrome = false; break; }
-        Check(monochrome, "log severity styling stays monochrome");
+        // BGRA：ERROR 标记/级别为 danger 红，WARN 为 warning 琥珀，不再退化成灰阶。
+        bool has_error_red = false;
+        bool has_warn_amber = false;
+        for (size_t i = 0; i + 3 < pixels.size(); i += 4) {
+            const int b = pixels[i], g = pixels[i + 1], r = pixels[i + 2];
+            if (r > 150 && r > g + 70 && r > b + 70) has_error_red = true;
+            if (r > 150 && g > 110 && r > b + 110 && g > b + 80) has_warn_amber = true;
+        }
+        Check(has_error_red, "log error severity uses danger color");
+        Check(has_warn_amber, "log warn severity uses warning color");
     };
     render(L"lumen_visual_logs.png");
     log.Arrange({0, 0, 400, 208});
@@ -5251,7 +6010,248 @@ void TestStructuredLogView() {
     Check(log.VisibleCount() == 0 && log.LevelCount(LogLevel::Info) == 0, "clearing logs clears counts");
 }
 
+
+void TestEditableComboChrome() {
+    bool ok = true;
+    int delta = 0;
+    for (float scale : {1.0f, 1.5f, 2.0f}) {
+        const int width = static_cast<int>(300.0f * scale);
+        OffscreenRenderer renderer;
+        if (!renderer.Init(width, static_cast<int>(64.0f * scale))) { ok = false; continue; }
+        struct ChromeCombo : ComboBox { using ComboBox::Measure; using ComboBox::Arrange; } combo;
+        const Theme theme = MakeTheme();
+        std::vector<uint8_t> pixels[2];
+        for (int pass = 0; pass < 2; ++pass) {
+            combo.Editable(pass == 1);
+            combo.Measure({280.0f, 40.0f}, theme);
+            combo.Arrange({10.0f, 10.0f, 280.0f, 40.0f});
+            Painter painter;
+            painter.BeginFrame(renderer.BeginDraw(), &UiText(), scale);
+            painter.FillRect({0.0f, 0.0f, 300.0f, 64.0f}, theme.bg);
+            DrawControlTree(painter, theme, &combo);
+            painter.EndFrame();
+            ok = renderer.EndDraw() && renderer.ReadBack(pixels[pass]) && ok;
+        }
+        if (pixels[0].empty() || pixels[0].size() != pixels[1].size()) { ok = false; continue; }
+        // The inner editor must not add another bottom edge/shadow inside the field.
+        for (int y = static_cast<int>(47.0f * scale); y <= static_cast<int>(48.0f * scale); ++y) {
+            for (int x = static_cast<int>(40.0f * scale); x < static_cast<int>(200.0f * scale); ++x) {
+                const size_t offset = (static_cast<size_t>(y) * width + x) * 4;
+                for (size_t channel = 0; channel < 4; ++channel) {
+                    delta = std::max(delta, std::abs(static_cast<int>(pixels[0][offset + channel]) -
+                                                   pixels[1][offset + channel]));
+                }
+            }
+        }
+        if (scale == 1.5f) ok = renderer.SavePNG(L"lumen_visual_editable_combo.png") && ok;
+    }
+    Check(ok && delta == 0, "editable combo shares one field chrome at 100/150/200 percent");
+}
+
+void TestParagraphEditing() {
+    struct Field : TextBox {
+        using TextBox::Measure; using TextBox::Arrange; using TextBox::OnKey;
+        using TextBox::OnChar; using TextBox::OnImeCompose; using TextBox::OnImeCommit;
+        using TextBox::OnImeEnd; using TextBox::ImeCaret; using TextBox::Undo; using TextBox::Redo;
+    };
+    const Theme theme = MakeTheme();
+    TextTypography style; style.family = L"Arial"; style.size = 16.0f; style.line_height = 19.2f;
+    const std::wstring content = L"Clear text \u6c34\u7535\u8d39 wraps without changing the font size.\nSecond paragraph.";
+    Field field;
+    field.Multiline(true).Typography(style).WordWrap(true).ContentPadding(2).Chrome(false).Text(content);
+    field.Measure({182.0f, 170.0f}, theme); field.Arrange({14.0f, 14.0f, 182.0f, 170.0f});
+    Check(field.VisualLineCount() >= 3, "paragraph word wrapping uses visual lines");
+    field.PlaceCaret({10000.0f, 8.0f});
+    Check(field.CaretBounds().y < 22.0f, "clicking a wrapped line end keeps trailing caret on that line");
+    const auto first = field.CaretBounds();
+    field.OnKey(VK_DOWN);
+    Check(field.CaretBounds().y > first.y + 10.0f, "Down moves through wrapped visual lines");
+    field.OnKey(VK_HOME);
+    Check(field.CaretBounds().x < 3.0f, "Home goes to visual line start");
+    field.Select(2, 5);
+    field.OnImeCompose(L"\u4e2d\u6587", 1, {});
+    Check(field.Text() == content && field.Composing(), "IME preedit does not delete the selected original text");
+    Point candidate{}; float candidate_h = 0;
+    Check(field.ImeCaret(candidate, candidate_h) && candidate_h > 10.0f && candidate.y >= 14.0f,
+          "paragraph IME candidate uses the visible shaped caret");
+    field.OnImeEnd();
+    Check(field.Text() == content && field.SelectionStart() == 2 && field.SelectionEnd() == 5,
+          "cancelling IME restores the original selection and text");
+    field.OnImeCompose(L"\u4e2d\u6587", 2, {}); field.OnImeCommit(L"\u4e2d\u6587");
+    const auto committed = content.substr(0, 2) + L"\u4e2d\u6587" + content.substr(5);
+    Check(field.Text() == committed, "IME result replaces the selection exactly once");
+    Check(field.Undo() && field.Text() == content, "IME replacement is one text undo operation");
+    Check(field.Redo() && field.Text() == committed, "IME replacement redo restores committed Unicode");
+
+    TextLayout layout;
+    layout.Layout(content, style, 178.0f, true);
+    std::vector<Rect> boxes;
+    layout.Selection(0, content.size(), boxes);
+    Check(boxes.size() >= 3, "shared selection geometry spans wrapped lines");
+    bool roundtrip = true;
+    for (size_t i = 0; i < content.size(); ++i) {
+        if (content[i] == L'\n' || content[i] == L' ') continue;
+        const auto caret = layout.Caret(i);
+        const auto hit = layout.HitTest({caret.x + .05f, caret.y + caret.h * .5f});
+        if (hit.index != i) roundtrip = false;
+    }
+    Check(roundtrip, "paragraph caret and pointer hit tests share one layout");
+
+    for (float scale : {1.0f, 1.5f, 2.0f}) {
+        OffscreenRenderer target;
+        const int width = static_cast<int>(420.0f * scale), height = static_cast<int>(220.0f * scale);
+        if (!target.Init(width, height)) { Check(false, "paragraph offscreen renderer"); continue; }
+        auto* dc = target.BeginDraw();
+        LumaTextBridge luma;
+        Check(luma.Init(UiText().Factory(), dc) && luma.Enabled(), "paragraph LumaText bridge is active");
+        target.EndDraw();
+        field.ResetDocument(content);field.Select(0,0);field.ReadOnly(true);
+        field.Foreground(Color::Hex(0x202020)).TextBackdrop(Color::Hex(0xffffff));
+        std::vector<uint8_t> pixels[2];
+        bool ok = true;
+        for (int pass = 0; pass < 2; ++pass) {
+            Painter painter;
+            painter.BeginFrame(target.BeginDraw(), &UiText(), scale);painter.SetLumaText(&luma);
+            painter.FillRect({0,0,420,220}, Color::Hex(0xffffff));
+            if (pass == 0) {
+                layout.Prepare(painter, {16,16}, Color::Hex(0x202020), Color::Hex(0xffffff));
+                layout.Draw(painter, {16,16}, Color::Hex(0x202020), Color::Hex(0xffffff));
+            } else DrawControlTree(painter, theme, &field);
+            painter.EndFrame();ok = target.EndDraw() && target.ReadBack(pixels[pass]) && ok;
+        }
+        Check(ok && pixels[0] == pixels[1], "display and editor glyph pixels match at the same DPI");
+        Check(luma.Stats().freetype_glyphs > 0 && luma.Stats().fallback_draws == 0,
+              "paragraph is really rasterized by LumaText, not a renamed DirectWrite fallback");
+        const auto glyphs = luma.Stats().freetype_glyphs;
+        auto styled = style;styled.family = L"Times New Roman";styled.weight = 700;styled.italic = true;styled.underline = true;
+        layout.Layout(L"Bold italic underline 12pt", styled, 380, true);
+        Painter painter;painter.BeginFrame(target.BeginDraw(), &UiText(), scale);painter.SetLumaText(&luma);
+        layout.Prepare(painter,{16,140},Color::Hex(0x202020),Color::Hex(0xffffff));
+        layout.Draw(painter,{16,140},Color::Hex(0x202020),Color::Hex(0xffffff));
+        painter.EndFrame();Check(target.EndDraw(), "styled paragraph end draw");
+        Check(luma.Stats().freetype_glyphs > glyphs && luma.Stats().fallback_draws == 0,
+              "arbitrary family and italic remain on the LumaText renderer");
+        wchar_t path[80]{};swprintf_s(path,L"lumen_visual_paragraph_%d.png",static_cast<int>(scale*100));
+        Check(target.SavePNG(path), "save paragraph DPI/state scene");
+        luma.Shutdown();
+        // Restore the shared layout after the style sample for the next DPI.
+        layout.Layout(content,style,178.0f,true);
+    }
+}
+
+void TestCompactToolWindow() {
+    Window owner(L"tool owner", {640.0f, 420.0f}, Frame::System);
+    owner.Root().Add<TextBox>(L"Keep selection and focus");
+    owner.Show();
+    const HWND owner_hwnd = static_cast<HWND>(owner.NativeHandle());
+    SetFocus(owner_hwnd);
+    WindowSpec spec;
+    spec.title = L"compact tool";
+    spec.titleBar = false;
+    spec.size = {380.0f, 148.0f};
+    spec.owner = owner_hwnd;
+    spec.backdrop = Backdrop::None;
+    Window tool(spec);
+    auto& row = tool.Root().Add<Row>();
+    auto& combo = row.Add<TestComboBox>();
+    combo.Items({L"Arial", L"Calibri", L"Courier New", L"Georgia", L"Segoe UI",
+                 L"Tahoma", L"Times New Roman", L"Verdana"}).Editable(true).SelectedIndex(0);
+    combo.MinSize({240.0f, 40.0f}).MaxSize({240.0f, 40.0f});
+    combo.Text(L"Georgia"); combo.CommitText();
+    Check(combo.SelectedIndex() == 3, "typed exact font commits matching selection");
+    combo.SelectedIndex(0);
+    auto& size = row.Add<NumberBox>(12);
+    size.MinSize({100.0f, 40.0f}).MaxSize({100.0f, 40.0f});
+    int showing = 0, shown = 0;
+    tool.OnShowing([&] { ++showing; });
+    tool.OnShown([&] { ++shown; });
+    tool.Show(false);
+    tool.LayoutNow();
+    Check(GetFocus() == owner_hwnd, "inactive tool window preserves owner keyboard focus");
+    Check(showing == 1 && shown == 1 && tool.Visible(), "inactive show retains visibility events");
+    const HWND hwnd = static_cast<HWND>(tool.NativeHandle());
+    Check(GetWindow(hwnd, GW_OWNER) == owner_hwnd, "compact tool keeps native owner");
+    auto pump = [&] {
+        MSG message{};
+        const ULONGLONG deadline = GetTickCount64() + 500;
+        // A focused TextBox intentionally animates its caret. Do not require its
+        // WM_PAINT queue to become empty on a slow/cold renderer.
+        while (GetTickCount64() < deadline && PeekMessageW(&message, hwnd, 0, 0, PM_REMOVE)) {
+            TranslateMessage(&message); DispatchMessageW(&message);
+        }
+    };
+    const UINT_PTR timer = SetTimer(hwnd, 0, 3000, [](HWND h, UINT, UINT_PTR id, DWORD) {
+        (void)h; (void)id;
+        Check(false, "compact combo watchdog");
+        if (auto popup = FindPopupWindows(); popup.first) PostMessageW(popup.first, WM_KEYDOWN, VK_ESCAPE, 0);
+    });
+    Check(combo.AutomationExpand(), "compact combo UIA expand returns without blocking");
+    bool outside = false;
+    tool.SetTimeout(.03f, [&] {
+        const auto popup = FindPopupWindows();
+        RECT host{}, drop{}; GetWindowRect(hwnd, &host);
+        if (popup.first) GetWindowRect(popup.first, &drop);
+        outside = popup.first && (drop.bottom > host.bottom || drop.top < host.top);
+        if (popup.first) {
+            SendMessageW(popup.first, WM_KEYDOWN, VK_DOWN, 0);
+            SendMessageW(popup.first, WM_KEYDOWN, VK_RETURN, 0);
+        } else tool.ClosePopup();
+    });
+    pump();
+    Check(outside && combo.SelectedIndex() == 1 && !tool.PopupActive(),
+          "compact font list escapes host clipping and Enter commits highlighted row");
+    combo.Editor().Focus();
+    Check(combo.AutomationExpand(), "compact combo reopens");
+    tool.SetTimeout(.03f, [&] {
+        const auto popup = FindPopupWindows();
+        std::printf("[INFO] compact Tab popup count=%d expanded=%d\n", popup.visible, combo.AutomationExpandState());
+        if (popup.first) PostMessageW(popup.first, WM_KEYDOWN, VK_TAB, 0);
+        else tool.ClosePopup();
+    });
+    pump();
+    Check(size.HasFocus() && !tool.PopupActive(), "Tab leaves detached combo for next field");
+    size.Focus();
+    Check(!size.ImeEnabled() && ImmGetContext(hwnd) == nullptr,
+          "numeric field suspends only its window IME context");
+    combo.Editor().Focus();
+    const HIMC restored = ImmGetContext(hwnd);
+    Check(restored != nullptr && combo.Editor().ImeEnabled(), "font input restores IME after numeric field");
+    if (restored) ImmReleaseContext(hwnd, restored);
+    Check(combo.AutomationExpand() && combo.AutomationCollapse(), "pending native dropdown can be collapsed");
+    pump();
+    Check(!tool.PopupActive() && combo.AutomationExpandState() == 0, "cancelled posted dropdown never reappears");
+    KillTimer(hwnd, timer);
+
+    struct CursorProbe : Control {
+        CursorShape shape = CursorShape::Arrow;
+        void Draw(Painter&, const Theme&) override {}
+        CursorShape CursorAt(Point) const override { return shape; }
+    };
+    auto& probe = tool.Root().Add<CursorProbe>();
+    probe.MinSize({0.0f, 32.0f}).MaxSize({100000.0f, 32.0f});
+    tool.Resize({320.0f, 180.0f});
+    tool.LayoutNow();
+    const auto bounds = probe.AbsoluteBounds();
+    const float scale = GetDpiForWindow(hwnd) / 96.0f;
+    const Point local{bounds.x + 20.0f, bounds.y + 12.0f};
+    tool.DispatchMouseMove(local);
+    POINT screen{static_cast<LONG>(local.x * scale), static_cast<LONG>(local.y * scale)};
+    ClientToScreen(hwnd, &screen); SetCursorPos(screen.x, screen.y);
+    const CursorShape shapes[]{CursorShape::SizeNWSE, CursorShape::SizeNESW, CursorShape::SizeAll, CursorShape::Cross};
+    const LPCWSTR cursors[]{IDC_SIZENWSE, IDC_SIZENESW, IDC_SIZEALL, IDC_CROSS};
+    for (size_t i = 0; i < std::size(shapes); ++i) {
+        probe.shape = shapes[i];
+        SendMessageW(hwnd, WM_SETCURSOR, reinterpret_cast<WPARAM>(hwnd), MAKELPARAM(HTCLIENT, WM_MOUSEMOVE));
+        Check(GetCursor() == LoadCursorW(nullptr, cursors[i]), "extended LUMEN cursor maps to system cursor");
+    }
+    tool.Hide(); owner.Close();
+}
+
 void TestNestedComboFlyout() {
+    // The preceding owned-window lifetime test closes its last native HWND.
+    // A new popup session must not inherit that test's process-level WM_QUIT.
+    MSG stale_quit{};
+    while (PeekMessageW(&stale_quit, nullptr, WM_QUIT, WM_QUIT, PM_REMOVE)) {}
     Window window(L"nested combo", {480.0f, 400.0f}, Frame::System);
     auto& trigger = window.Root().Add<Button>(L"Filters");
     Flyout filters;
@@ -5269,7 +6269,11 @@ void TestNestedComboFlyout() {
         if (auto popup = FindPopupWindows(); popup.first) PostMessageW(popup.first, WM_KEYDOWN, VK_ESCAPE, 0);
         KillTimer(hwnd, id);
     });
-    window.Post([&] {
+    combo.Focus();
+    window.DispatchKey(VK_SPACE);
+    window.SetTimeout(.03f, [&] {
+        std::printf("[INFO] nested flyout=%d popup=%d closed=%d bound=%d\n",
+                    window.FlyoutActive(), window.PopupActive(), closed, combo.WindowOf() == &window);
         Check(window.FlyoutActive() && window.PopupActive() && closed == 0,
               "dropdown preserves parent filters");
         const auto popup = FindPopupWindows();
@@ -5277,15 +6281,20 @@ void TestNestedComboFlyout() {
         SendMessageW(popup.first, WM_KEYDOWN, VK_DOWN, 0);
         SendMessageW(popup.first, WM_KEYDOWN, VK_RETURN, 0);
     });
-    combo.Focus();
-    window.DispatchKey(VK_SPACE);
+    MSG pending{};
+    while (PeekMessageW(&pending, owner, 0, 0, PM_REMOVE)) {
+        TranslateMessage(&pending); DispatchMessageW(&pending);
+    }
     KillTimer(owner, timer);
     Check(combo.SelectedIndex() == 1 && !window.PopupActive(), "nested combo commits selected item");
     Check(window.FlyoutActive() && closed == 0 && combo.WindowOf() == &window,
           "filters remains bound after selection");
-    window.Post([&] { window.ClosePopup(); });
     combo.Focus();
     window.DispatchKey(VK_SPACE);
+    window.SetTimeout(.03f, [&] { window.ClosePopup(); });
+    while (PeekMessageW(&pending, owner, 0, 0, PM_REMOVE)) {
+        TranslateMessage(&pending); DispatchMessageW(&pending);
+    }
     Check(window.FlyoutActive() && closed == 0, "nested combo can reopen and cancel");
     window.CloseFlyout();
     Check(closed == 1, "parent filters closes once when requested");
@@ -5449,6 +6458,92 @@ void TestHwndFocus() {
     Check(window.Focused() == nullptr, "explicit ClearFocus is not restored on SETFOCUS");
     hook.Disconnect();
     window.Close();
+}
+
+void TestPointerDoubleClickRecognition() {
+    struct Target : Control { void Draw(Painter&, const Theme&) override {} } one, two;
+    PointerClick clicks;
+    const Point position{24.0f, 18.0f}, extent{3.0f, 3.0f}, drag{3.0f, 3.0f};
+    Check(!clicks.Down(&one, position, 100, PT_MOUSE, extent, 500), "pointer first press is not a double click");
+    clicks.Up(&one, position, drag);
+    Check(clicks.Down(&one, position, 180, PT_MOUSE, extent, 500), "pointer completed mouse click pair emits double click");
+    Check(clicks.PromotedDuplicate(position, 180), "same pointer double click is recognized for legacy deduplication");
+    Check(!clicks.PromotedDuplicate(position, 181), "independent legacy double click is not discarded by stale pointer state");
+    Check(!clicks.PromotedDuplicate({40.0f,18.0f}, 180), "different legacy double click location is not deduplicated");
+    clicks.Up(&one, position, drag);
+    Check(!clicks.Down(&one, position, 260, PT_MOUSE, extent, 500), "pointer third press does not duplicate the second double click");
+    clicks.Up(&one, position, drag);
+    Check(clicks.Down(&one, position, 340, PT_MOUSE, extent, 500), "pointer fourth press starts the next double click pair");
+    clicks.Cancel();
+
+    clicks.Down(&one, position, 1000, PT_MOUSE, extent, 500);clicks.Up(&one, position, drag);
+    Check(!clicks.Down(&two, position, 1080, PT_MOUSE, extent, 500), "pointer double click never crosses controls");
+    clicks.Cancel();
+    clicks.Down(&one, position, 2000, PT_MOUSE, extent, 500);clicks.Up(&one, position, drag);
+    Check(!clicks.Down(&one, position, 2600, PT_MOUSE, extent, 500), "pointer pair respects the system double click timeout");
+    clicks.Cancel();
+    clicks.Down(&one, position, 3000, PT_MOUSE, extent, 500);clicks.Up(&one, position, drag);
+    Check(!clicks.Down(&one, {32.0f,18.0f}, 3080, PT_MOUSE, extent, 500), "pointer pair respects physical double click bounds");
+    clicks.Cancel();
+    clicks.Down(&one, position, 4000, PT_MOUSE, extent, 500);clicks.Move({40.0f,18.0f}, drag);clicks.Move(position, drag);clicks.Up(&one, position, drag);
+    Check(!clicks.Down(&one, position, 4080, PT_MOUSE, extent, 500), "dragging out and back cannot arm a double click");
+    clicks.Cancel();
+    clicks.Down(&one, position, 5000, PT_MOUSE, extent, 500);clicks.Up(&one, {40.0f,18.0f}, drag);
+    Check(!clicks.Down(&one, position, 5080, PT_MOUSE, extent, 500), "distant release without a move message is not a click");
+    clicks.Cancel();
+    clicks.Down(&one, position, 6000, PT_MOUSE, extent, 500);clicks.Up(&two, position, drag);
+    Check(!clicks.Down(&one, position, 6080, PT_MOUSE, extent, 500), "release on a different target is not a completed click");
+    clicks.Cancel();
+    clicks.Down(&one, position, 7000, PT_MOUSE, extent, 500);clicks.Cancel();
+    Check(!clicks.Down(&one, position, 7080, PT_MOUSE, extent, 500), "capture cancellation clears the click sequence");
+    clicks.Cancel();
+    clicks.Down(&one, position, 8000, PT_MOUSE, extent, 500);clicks.Up(&one, position, drag);
+    Check(!clicks.Down(&one, position, 8080, PT_PEN, extent, 500), "mouse and pen clicks are not combined");
+    clicks.Cancel();
+    clicks.Down(&one, position, 0xfffffff0u, PT_MOUSE, extent, 500);clicks.Up(&one, position, drag);
+    Check(clicks.Down(&one, position, 32, PT_MOUSE, extent, 500), "native message timestamp wrap preserves a valid click pair");
+    clicks.Cancel();
+    auto temporary = std::make_unique<Target>();
+    clicks.Down(temporary.get(), position, 9000, PT_MOUSE, extent, 500);clicks.Up(temporary.get(), position, drag);temporary.reset();
+    Check(!clicks.Down(&one, position, 9080, PT_MOUSE, extent, 500), "deleted controls cannot receive a deferred double click");
+    clicks.Cancel();
+    Check(!clicks.Down(nullptr, position, 10000, PT_MOUSE, extent, 500) && !clicks.Pressed(),
+          "dismissed overlays and empty hits cannot arm pointer clicks");
+}
+
+void TestListSecondaryText() {
+    struct List : ListView {
+        using ListView::Measure;using ListView::Arrange;using ListView::OnMouseDown;using ListView::OnMouseUp;
+        using ListView::AutomationItemName;
+    };
+    const Theme theme=MakeTheme();
+    List list;
+    std::wstring state=L"Queued";
+    list.ItemCount(3,false).ItemText([](size_t i,std::wstring& out){out=i==0?L"Document.pdf":i==1?L"Report.docx":L"Notes.txt";});
+    list.ItemSecondaryText([&](size_t i,std::wstring& out){out=(i==0?L"PDF | ":i==1?L"Word | ":L"Text | ")+state;});
+    list.Measure({360,180},theme);list.Arrange({0,0,360,180});
+    list.OnMouseDown({50,60},0x0001);list.OnMouseUp({50,60},0);
+    Check(list.SelectedIndex()==1,"two-line list hit testing uses expanded row height");
+    Check(list.AutomationItemName(1).find(L"Word | Queued")!=std::wstring::npos,"secondary status is available to accessibility");
+    OffscreenRenderer target;Check(target.Init(360,180),"secondary list renderer");
+    std::vector<uint8_t> before,after;
+    auto paint=[&](std::vector<uint8_t>& pixels){
+        Painter painter;painter.BeginFrame(target.BeginDraw(),&UiText(),1);
+        painter.FillRect({0,0,360,180},theme.bg);DrawControlTree(painter,theme,&list);
+        painter.EndFrame();return target.EndDraw()&&target.ReadBack(pixels);
+    };
+    Check(paint(before),"paint secondary list initial status");
+    state=L"Completed 24 pages";list.RefreshItems();
+    Check(list.SelectedIndex()==1&&list.ItemCount()==3,"refreshing row data does not reset selection or count");
+    Check(paint(after)&&before!=after,"refreshing secondary provider invalidates cached row pixels");
+    Check(target.SavePNG(L"lumen_visual_list_secondary.png"),"save secondary list state scene");
+    list.CanReorder(true).MoveItem(0,2);
+    Check(list.AutomationItemName(2).find(L"Document.pdf")!=std::wstring::npos&&list.AutomationItemName(2).find(L"PDF | Completed")!=std::wstring::npos,
+          "secondary provider follows reordered data indices");
+    list.ItemSecondaryText({});list.Measure({360,180},theme);list.Arrange({0,0,360,180});
+    list.OnMouseDown({50,60},0x0001);list.OnMouseUp({50,60},0);
+    Check(list.SelectedIndex()==2,"removing secondary provider restores single-line row hit testing");
+    Check(list.AutomationItemName(0).find(L"|")==std::wstring::npos,"single-line accessibility contract is unchanged");
 }
 
 void TestPointer() {
@@ -6138,13 +7233,20 @@ void TestReviewFixes() {
     }
 }
 
-int main() {
+int main(int argc, char** argv) {
     std::setvbuf(stdout, nullptr, _IONBF, 0);   // 崩溃时也要能看到已通过的断言
     AddVectoredExceptionHandler(1, CrashReport);
     if (FAILED(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED))) {
         std::printf("[FAIL] CoInitializeEx\n");
         return 1;
     }
+    if (argc > 1 && std::strcmp(argv[1], "--paragraph") == 0) {
+        TestParagraphEditing();
+        CoUninitialize();
+        std::printf("%s\n", g_failures == 0 ? "ALL PASS" : "FAILURES PRESENT");
+        return g_failures == 0 ? 0 : 1;
+    }
+    TestParagraphEditing();
     TestSignal();
     TestReviewFixes();
     TestLayout();
@@ -6165,11 +7267,19 @@ int main() {
     TestEscapeShortcut();
     TestHwndFocus();
     TestPopupWindow();
+    TestEditableComboChrome();
+    TestCompactToolWindow();
     TestNestedComboFlyout();
     TestTableHeaderCheck();
     TestStructuredLogView();
+    TestStatusColors();
+    TestSkeletonMotion();
+    TestColorLight();
+    TestLayoutContract();
     TestTypedEditSafety();
     TestHiddenAnimation();
+    TestPointerDoubleClickRecognition();
+    TestListSecondaryText();
     TestPointer();
     TestDirtyRects();
     TestUia();

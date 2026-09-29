@@ -29,6 +29,13 @@ constexpr float kDragSlop = 8.0f;
 constexpr float kSwipePad = 12.0f;
 constexpr float kSwipeCommit = 36.0f;
 constexpr uint32_t kLeftButton = 0x0001;
+// Reorder: the lifted row tracks the pointer 1:1; neighbours slide on a
+// critically damped spring and the drop settles with a slight overshoot.
+constexpr float kAutoScrollEdge = 40.0f;     // DIP band at the top/bottom edge
+constexpr float kAutoScrollMax = 1100.0f;    // DIP/s at the very edge
+constexpr float kReorderRubber = 0.35f;      // overscroll past the range, in rows
+constexpr Spring kGapSpring{520.0f, 46.0f, 1.0f};
+constexpr Spring kSettleSpring{420.0f, 36.0f, 1.0f};
 
 Color Fade(Color c, float t) noexcept {
     c.a *= t;
@@ -79,6 +86,12 @@ ListView::ListView() = default;
 ListView::~ListView() = default;
 
 void ListView::RelayoutParent() { Control::RelayoutParent(); }
+
+void ListView::RefreshItems() {
+    model_cache_ = -1;
+    draw_cache_.reset();
+    Invalidate();
+}
 
 void ListView::EnsureOrder() {
     if (order_.size() == item_count_) return;
@@ -155,6 +168,7 @@ ListView& ListView::EmptyAction(std::wstring_view label, std::function<void()> o
 }
 
 ListView& ListView::AnimateInserted(size_t index) {
+    DropReorder();
     enter_playing_ = false;
     if (index >= item_count_) return *this;
     mut_done_ = {};
@@ -171,6 +185,7 @@ ListView& ListView::AnimateInserted(size_t index) {
 }
 
 ListView& ListView::AnimateRemoved(size_t index, std::function<void()> done) {
+    DropReorder();
     enter_playing_ = false;
     mut_done_ = std::move(done);
     if (index >= item_count_) {
@@ -213,17 +228,20 @@ float ListView::SwipeActionWidth(const ListSwipeAction& action) const {
 
 bool ListView::LivePaint() const noexcept {
     return enter_playing_ || !groups_.empty() || !order_.empty() || item_count_ == 0 ||
-           swipe_row_ >= 0 || reorder_dragging_ || mut_kind_ != MutKind::None ||
+           swipe_row_ >= 0 || reorder_dragging_ || float_row_ >= 0 ||
+           mut_kind_ != MutKind::None ||
            std::fabs(swipe_x_) > 0.5f;
 }
 
 ListView& ListView::ItemCount(size_t count, bool play_enter) {
+    RefreshItems();
     groups_.clear();
     group_offsets_.clear();
     order_.clear();
     item_count_ = count;
     swipe_row_ = -1;
     swipe_x_ = 0.0f;
+    DropReorder();
     mut_kind_ = MutKind::None;
     mut_index_ = -1;
     mut_done_ = {};
@@ -299,6 +317,7 @@ ListView& ListView::Bind(std::shared_ptr<ItemsModel> model) {
 
 ListView& ListView::Groups(std::vector<ListGroup> groups) {
     order_.clear();
+    DropReorder();
     groups_ = std::move(groups);
     RebuildGroups();
     FilterSelection();
@@ -324,6 +343,7 @@ void ListView::RebuildGroups() {
 ListView& ListView::GroupExpanded(std::wstring_view id, bool expanded) {
     for (size_t i = 0; i < groups_.size(); ++i) {
         if (groups_[i].id != id || groups_[i].expanded == expanded) continue;
+        DropReorder();
         groups_[i].expanded = expanded;
         ClampScroll();
         Invalidate();
@@ -501,7 +521,7 @@ void ListView::ClampScroll() {
 }
 
 Size ListView::Measure(Size available, const Theme& theme) {
-    theme_row_height_ = theme.list_row_height;
+    theme_row_height_ = RowHeight(theme);
     SyncEmpty();
     if (empty_ && empty_->Visible()) {
         for (size_t i = 0; i < ChildCount(); ++i) {
@@ -532,11 +552,45 @@ void ListView::Arrange(const Rect& absolute) {
 
 void ListView::OnFocusChanged(bool focused) {
     Control::OnFocusChanged(focused);
+    if (!focused) CancelReorder();   // capture is gone; do not strand the lifted row
     Invalidate();
 }
 
 bool ListView::OnAnimate(float dt_seconds) {
+    const float scroll_before = scroll_offset_;
     bool moving = EaseTo(scroll_offset_, target_offset_, dt_seconds, 20.0f, 0.1f);
+    if (reorder_dragging_) {
+        moving |= StepAutoScroll(dt_seconds);
+        // Wheel or auto-scroll moved the content under a stationary pointer.
+        if (scroll_offset_ != scroll_before) UpdateReorder(reorder_pointer_);
+    }
+    if (float_row_ >= 0 && float_row_ < static_cast<ptrdiff_t>(item_count_)) {
+        bool active = false;
+        const float gap_target = static_cast<float>(drop_row_ >= 0 ? drop_row_ : float_row_);
+        if (MotionScale() <= 0.001f) {
+            gap_.Snap(gap_target);
+            lift_ = reorder_dragging_ ? 1.0f : 0.0f;
+            if (!reorder_dragging_) float_top_.Snap(ItemTop(static_cast<size_t>(float_row_)));
+        } else {
+            active |= gap_.Tick(gap_target, dt_seconds, kGapSpring);
+            active |= EaseTo(lift_, reorder_dragging_ ? 1.0f : 0.0f, dt_seconds,
+                             reorder_dragging_ ? 20.0f : 12.0f);
+            if (!reorder_dragging_) {
+                active |= float_top_.Tick(ItemTop(static_cast<size_t>(float_row_)), dt_seconds,
+                                          kSettleSpring);
+            }
+        }
+        if (!reorder_dragging_ && !active) {
+            float_row_ = -1;
+            drop_row_ = -1;
+            lift_ = 0.0f;
+        }
+        moving |= active;
+        Invalidate();
+    } else if (float_row_ >= 0) {
+        float_row_ = -1;
+        lift_ = 0.0f;
+    }
     moving |= EaseTo(expand_progress_, (hovered_ || dragging_) ? 1.0f : 0.0f, dt_seconds, 18.0f);
     if (!swipe_dragging_ && std::fabs(swipe_x_) > 0.01f) {
         moving |= EaseTo(swipe_x_, 0.0f, dt_seconds, 22.0f, 0.4f);
@@ -650,6 +704,10 @@ void ListView::SelectJump(ptrdiff_t index, bool to_end) {
 }
 
 bool ListView::OnKey(uint32_t vk) {
+    if (reorder_dragging_) {
+        if (vk == VK_ESCAPE) CancelReorder();
+        return true;   // navigation would fight the drag
+    }
     const float row_h = std::max(theme_row_height_, 1.0f);
     const ptrdiff_t page =
         std::max(ptrdiff_t{1}, static_cast<ptrdiff_t>(absolute_.h / row_h));
@@ -865,6 +923,11 @@ void ListView::MoveGroupedFocus(int direction) {
 }
 
 void ListView::BeginPress(Point local, ptrdiff_t row) {
+    if (float_row_ >= 0 && !reorder_dragging_) {
+        float_row_ = -1;   // a new press lands the previous drop immediately
+        lift_ = 0.0f;
+        Invalidate();
+    }
     press_local_ = local;
     press_row_ = row;
     press_armed_ = true;
@@ -880,7 +943,7 @@ void ListView::ResetPress() {
     swipe_dragging_ = false;
     reorder_dragging_ = false;
     pan_vertical_ = false;
-    drop_row_ = -1;
+    if (float_row_ < 0) drop_row_ = -1;   // keep the settle target alive
 }
 
 void ListView::ApplySwipeX(float x) {
@@ -911,16 +974,124 @@ void ListView::EndSwipe() {
     Animate();
 }
 
-void ListView::EndReorder() {
-    const ptrdiff_t from = press_row_;
-    ptrdiff_t to = drop_row_;
+void ListView::DropReorder() {
+    if (reorder_dragging_) press_armed_ = false;
+    reorder_dragging_ = false;
+    float_row_ = -1;
+    drop_row_ = -1;
+    lift_ = 0.0f;
+}
+
+bool ListView::BeginReorder() {
+    if (press_row_ < 0 || press_row_ >= static_cast<ptrdiff_t>(item_count_)) return false;
+    if (mut_kind_ != MutKind::None) return false;
+    ptrdiff_t lo = 0;
+    ptrdiff_t hi = static_cast<ptrdiff_t>(item_count_) - 1;
+    if (!groups_.empty()) {
+        const ptrdiff_t g = GroupForItem(press_row_);
+        if (g < 0) return false;
+        lo = static_cast<ptrdiff_t>(group_offsets_[static_cast<size_t>(g)]);
+        hi = lo + static_cast<ptrdiff_t>(groups_[static_cast<size_t>(g)].item_count) - 1;
+    }
+    if (hi <= lo) return false;
+    const float top = ItemTop(static_cast<size_t>(press_row_));
+    if (top < 0.0f) return false;
+    enter_playing_ = false;
+    reorder_dragging_ = true;
+    reorder_lo_ = lo;
+    reorder_hi_ = hi;
+    float_row_ = press_row_;
+    drop_row_ = press_row_;
+    reorder_grab_ = press_local_.y + scroll_offset_ - top;
+    float_top_.Snap(top);
+    gap_.Snap(static_cast<float>(press_row_));
+    lift_ = 0.0f;
+    hover_row_ = -1;
+    hover_group_ = -1;
+    Animate();
+    return true;
+}
+
+void ListView::UpdateReorder(Point local) {
+    if (!reorder_dragging_ || float_row_ < 0) return;
+    reorder_pointer_ = local;
+    const float row_h = std::max(theme_row_height_, 1.0f);
+    const float lo_top = ItemTop(static_cast<size_t>(reorder_lo_));
+    const float hi_top = ItemTop(static_cast<size_t>(reorder_hi_));
+    const float raw = local.y + scroll_offset_ - reorder_grab_;
+    const float clamped = Clamp(raw, lo_top, hi_top);
+    // Past either end the row resists instead of stopping dead.
+    const float rubber = row_h * kReorderRubber;
+    float top = clamped;
+    if (raw < lo_top) {
+        const float over = lo_top - raw;
+        top = lo_top - rubber * over / (over + rubber);
+    } else if (raw > hi_top) {
+        const float over = raw - hi_top;
+        top = hi_top + rubber * over / (over + rubber);
+    }
+    float_top_.value = top;
+    float_top_.velocity = 0.0f;
+    // The drop slot is wherever the lifted row's centre sits.
+    const ptrdiff_t slot = Clamp(
+        reorder_lo_ + static_cast<ptrdiff_t>(std::floor((clamped - lo_top) / row_h + 0.5f)),
+        reorder_lo_, reorder_hi_);
+    drop_row_ = slot;
+    Animate();
+    Invalidate();
+}
+
+bool ListView::StepAutoScroll(float dt) {
+    const float edge = std::min(kAutoScrollEdge, absolute_.h * 0.25f);
+    if (edge <= 1.0f || MaxScroll() <= 0.5f || dt <= 0.0f) return false;
+    const float y = reorder_pointer_.y;
+    float v = 0.0f;
+    if (y < edge) v = -std::min(1.0f, (edge - y) / edge);
+    else if (y > absolute_.h - edge) v = std::min(1.0f, (y - (absolute_.h - edge)) / edge);
+    if (v == 0.0f) return false;
+    const float before = scroll_offset_;
+    scroll_offset_ = Clamp(scroll_offset_ + kAutoScrollMax * v * std::fabs(v) * dt, 0.0f,
+                           MaxScroll());
+    target_offset_ = scroll_offset_;
+    if (scroll_offset_ == before) return false;
+    Invalidate();
+    return true;
+}
+
+float ListView::ReorderShift(ptrdiff_t row) const noexcept {
+    if (float_row_ < 0 || row == float_row_ || row < reorder_lo_ || row > reorder_hi_) return 0.0f;
+    // s = slot among the rows that stay put; the gap pushes rows at or after it down.
+    const float s = static_cast<float>(row < float_row_ ? row : row - 1);
+    const float shown = s + Clamp(s - gap_.value + 1.0f, 0.0f, 1.0f);
+    return (shown - static_cast<float>(row)) * std::max(theme_row_height_, 1.0f);
+}
+
+void ListView::CancelReorder() {
+    if (!reorder_dragging_) return;
     reorder_dragging_ = false;
     press_armed_ = false;
+    press_row_ = -1;
+    drop_row_ = float_row_;   // neighbours slide back, the row springs home
+    Animate();
+    Invalidate();
+}
+
+void ListView::EndReorder() {
+    const ptrdiff_t from = float_row_;
+    const ptrdiff_t to = drop_row_;
+    reorder_dragging_ = false;
+    press_armed_ = false;
+    press_row_ = -1;
     if (from >= 0 && to >= 0 && from != to) {
-        if (!groups_.empty() && GroupForItem(from) != GroupForItem(to)) to = from;
-        if (from != to) MoveItem(static_cast<size_t>(from), static_cast<size_t>(to));
+        const size_t moved = DataIndex(static_cast<size_t>(from));
+        float_row_ = to;   // set first: a Reordered handler may reset the list
+        MoveItem(static_cast<size_t>(from), static_cast<size_t>(to));
+        if (float_row_ == to && DataIndex(static_cast<size_t>(to)) != moved) {
+            float_row_ = from;
+            drop_row_ = from;
+        }
     }
-    drop_row_ = -1;
+    Animate();
     Invalidate();
 }
 
@@ -979,8 +1150,7 @@ void ListView::OnMouseMove(Point local, uint32_t buttons) {
                     swipe_dragging_ = true;
                     swipe_row_ = press_row_;
                 } else if (can_reorder_ && press_row_ >= 0) {
-                    reorder_dragging_ = true;
-                    drop_row_ = press_row_;
+                    BeginReorder();
                 }
             }
         }
@@ -989,18 +1159,7 @@ void ListView::OnMouseMove(Point local, uint32_t buttons) {
             return;
         }
         if (reorder_dragging_) {
-            ptrdiff_t row = RowAt(local);
-            if (row < 0 && item_count_ > 0 && local.y + scroll_offset_ >= ContentHeight()) {
-                row = static_cast<ptrdiff_t>(item_count_) - 1;
-            }
-            if (row >= 0 && !groups_.empty() &&
-                GroupForItem(press_row_) != GroupForItem(row)) {
-                row = press_row_;
-            }
-            if (row != drop_row_) {
-                drop_row_ = row;
-                Invalidate();
-            }
+            UpdateReorder(local);
             return;
         }
     }
@@ -1023,6 +1182,10 @@ void ListView::OnMouseUp(Point local, uint32_t) {
     if (swipe_dragging_) EndSwipe();
     else if (reorder_dragging_) EndReorder();
     else ResetPress();
+    if (float_row_ >= 0) {
+        hover_row_ = RowAt(local);   // shown once the drop has settled
+        hover_group_ = GroupAt(local);
+    }
     Animate();
     if (clicked >= 0) activate_.Emit(static_cast<size_t>(clicked));
 }
@@ -1077,11 +1240,11 @@ bool ListView::PrefersDragOverPan() const noexcept {
 }
 
 CursorShape ListView::CursorAt(Point) const {
-    return reorder_dragging_ ? CursorShape::SizeNS : CursorShape::Arrow;
+    return reorder_dragging_ ? CursorShape::SizeAll : CursorShape::Arrow;
 }
 
 void ListView::Draw(Painter& painter, const Theme& theme) {
-    theme_row_height_ = theme.list_row_height;
+    theme_row_height_ = RowHeight(theme);
     const float row_h = std::max(theme_row_height_, 1.0f);
     ClampScroll();
 
@@ -1145,16 +1308,15 @@ void ListView::Draw(Painter& painter, const Theme& theme) {
             painter.FillRoundedRect(row_slot, theme.radius_control, Fade(theme.fill_selected, alpha));
             painter.FillRoundedRect({row_slot.x, row_slot.y, 3.0f, row_slot.h}, 1.5f,
                                     Fade(theme.accent, alpha));
-        } else if (row == hover_row_ && enabled_ && !reorder_dragging_) {
+        } else if (row == hover_row_ && enabled_ && float_row_ < 0) {
             painter.FillRoundedRect(row_slot, theme.radius_control, Fade(theme.fill_hover, alpha));
-        }
-        if (reorder_dragging_ && row == press_row_) {
-            painter.StrokeRoundedRect(row_slot, theme.radius_control, Fade(theme.accent, 0.55f), 1.0f);
         }
         draw_text_.clear();
         draw_glyph_.clear();
+        draw_secondary_.clear();
         const size_t data = DataIndex(static_cast<size_t>(row));
         if (item_text_) item_text_(data, draw_text_);
+        if (item_secondary_) item_secondary_(data, draw_secondary_);
         if (item_glyph_) item_glyph_(data, draw_glyph_);
         const std::wstring& glyph = draw_glyph_;
         const std::wstring& text = draw_text_;
@@ -1167,16 +1329,53 @@ void ListView::Draw(Painter& painter, const Theme& theme) {
                              Fade(theme.text_secondary, alpha));
             text_x += 26.0f;
         }
-        if (!text.empty()) {
+        if (!draw_secondary_.empty()) {
+            const float top = shifted.y + (shifted.h - 40.0f) * 0.5f;
+            const float width = std::max(0.0f, shifted.Right() - 12.0f - text_x);
+            painter.DrawText(text, {text_x, top, width, 22.0f}, item_text_role_, Fade(theme.text, alpha));
+            painter.DrawText(draw_secondary_, {text_x, top + 22.0f, width, 18.0f},
+                             TextRole::Caption, Fade(theme.text_secondary, alpha));
+        } else if (!text.empty()) {
             painter.DrawText(text, {text_x, shifted.y, shifted.Right() - 12.0f - text_x, shifted.h},
                              item_text_role_, Fade(theme.text, alpha));
         }
     };
 
-    const auto paint_drop = [&] {
-        if (!reorder_dragging_ || drop_row_ < 0) return;
-        const float y = absolute_.y + ItemTop(static_cast<size_t>(drop_row_)) - scroll_offset_;
-        painter.FillRect({absolute_.x + 8.0f, y - 1.0f, absolute_.w - 16.0f, 2.0f}, theme.accent);
+    // Lifted row: vacated slot as a faint well that slides with the gap, then the
+    // row itself on an opaque surface with elevation glow, tracking the pointer.
+    const auto paint_float = [&] {
+        if (float_row_ < 0 || float_row_ >= static_cast<ptrdiff_t>(item_count_)) return;
+        const float lift = Clamp(lift_, 0.0f, 1.0f);
+        const float lo_top = ItemTop(static_cast<size_t>(reorder_lo_));
+        if (lo_top >= 0.0f && lift > 0.01f) {
+            const float gap_y = absolute_.y + lo_top - scroll_offset_ +
+                                (gap_.value - static_cast<float>(reorder_lo_)) * row_h;
+            const Rect well = Rect{absolute_.x, gap_y, absolute_.w, row_h}.Inset(4.0f, 2.0f);
+            painter.FillRoundedRect(well, theme.radius_control, Fade(theme.fill_hover, 0.6f * lift));
+            painter.StrokeRoundedRect(well, theme.radius_control, Fade(theme.stroke_divider, lift),
+                                      1.0f);
+        }
+        const float y = absolute_.y + float_top_.value - scroll_offset_;
+        const Rect card = Rect{absolute_.x, y, absolute_.w, row_h}.Inset(4.0f, 0.0f);
+        if (lift > 0.01f) {
+            const Color glow = theme.glow_sm;
+            painter.DrawGlow(card, theme.radius_control,
+                             Color{glow.r, glow.g, glow.b, glow.a * theme.elevation_glow[2] * lift},
+                             theme.elevation_spread[2]);
+        }
+        const Color under = theme.fill_input;
+        const Color over = theme.fill_input_pressed;
+        const Color surface{under.r + (over.r - under.r) * lift, under.g + (over.g - under.g) * lift,
+                            under.b + (over.b - under.b) * lift, 1.0f};
+        painter.FillRoundedRect(card, theme.radius_control, surface);
+        if (lift > 0.01f) {
+            painter.DrawInnerLight(card, theme.radius_control,
+                                   Fade(theme.specular_line, theme.elevation_specular[2] * lift),
+                                   Color{0.0f, 0.0f, 0.0f, 0.30f * lift});
+            painter.StrokeRoundedRect(card, theme.radius_control, Fade(theme.control_stroke, lift),
+                                      1.0f);
+        }
+        draw_item(float_row_, y, 0, row_h);
     };
 
     const auto paint_ungrouped = [&] {
@@ -1202,14 +1401,19 @@ void ListView::Draw(Painter& painter, const Theme& theme) {
         } else {
             const ptrdiff_t first = static_cast<ptrdiff_t>(scroll_offset_ / row_h);
             const ptrdiff_t visible = static_cast<ptrdiff_t>(absolute_.h / row_h) + 2;
-            for (ptrdiff_t row = first;
-                 row < first + visible && row < static_cast<ptrdiff_t>(item_count_); ++row) {
+            // While reordering, neighbours slide in from one row outside the viewport.
+            const ptrdiff_t pad = float_row_ >= 0 ? 1 : 0;
+            for (ptrdiff_t row = std::max(ptrdiff_t{0}, first - pad);
+                 row < first + visible + pad && row < static_cast<ptrdiff_t>(item_count_); ++row) {
+                if (row == float_row_) continue;
                 const size_t vis = static_cast<size_t>(std::max(ptrdiff_t{0}, row - first));
-                draw_item(row, absolute_.y + static_cast<float>(row) * row_h - scroll_offset_, vis,
-                          row_h);
+                draw_item(row,
+                          absolute_.y + static_cast<float>(row) * row_h + ReorderShift(row) -
+                              scroll_offset_,
+                          vis, row_h);
             }
         }
-        paint_drop();
+        paint_float();
     };
 
     const auto paint_grouped = [&] {
@@ -1237,16 +1441,21 @@ void ListView::Draw(Painter& painter, const Theme& theme) {
             if (groups_[g].expanded) {
                 const float group_start = cursor;
                 const size_t count = groups_[g].item_count;
+                const ptrdiff_t pad = float_row_ >= 0 ? 1 : 0;
                 const ptrdiff_t first = std::max(
-                    ptrdiff_t{0}, static_cast<ptrdiff_t>((absolute_.y - group_start) / row_h));
-                const ptrdiff_t visible = static_cast<ptrdiff_t>(absolute_.h / row_h) + 2;
+                    ptrdiff_t{0},
+                    static_cast<ptrdiff_t>((absolute_.y - group_start) / row_h) - pad);
+                const ptrdiff_t visible = static_cast<ptrdiff_t>(absolute_.h / row_h) + 2 + pad;
                 const ptrdiff_t end = std::min(static_cast<ptrdiff_t>(count), first + visible);
                 for (ptrdiff_t i = first; i < end; ++i) {
-                    const float item_y = group_start + static_cast<float>(i) * row_h;
+                    const ptrdiff_t item = static_cast<ptrdiff_t>(group_offsets_[g]) + i;
+                    if (item == float_row_) continue;
+                    const float item_y =
+                        group_start + static_cast<float>(i) * row_h + ReorderShift(item);
                     if (item_y + row_h >= absolute_.y && item_y <= absolute_.Bottom()) {
                         const size_t vis =
                             static_cast<size_t>(std::max(0.0f, (item_y - absolute_.y) / row_h));
-                        draw_item(static_cast<ptrdiff_t>(group_offsets_[g]) + i, item_y, vis, row_h);
+                        draw_item(item, item_y, vis, row_h);
                     }
                 }
                 cursor = group_start + static_cast<float>(count) * row_h;
@@ -1262,7 +1471,7 @@ void ListView::Draw(Painter& painter, const Theme& theme) {
             painter.DrawText(group.title, {header.x + 30.0f, header.y, header.w - 42.0f, header.h},
                              group_text_role_, theme.text_secondary);
         }
-        paint_drop();
+        paint_float();
     };
 
     const auto replay_list = [](ID2D1DeviceContext2* dc, ID2D1CommandList* list) {

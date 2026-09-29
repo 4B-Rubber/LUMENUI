@@ -14,7 +14,15 @@ Size Label::Measure(Size available, const Theme&) {
         return {0.0f, 20.0f};
     }
     if (wrap_) {
-        const float width = available.w > 0.0f ? available.w : 400.0f;
+        // 无约束（Row 主轴、WrapPanel 首测）返回单行自然宽，由父级再按可用宽收缩重测；
+        // 有约束时左对齐取 min(自然宽, 可用宽)，居中/右对齐仍占满可用宽以保持对齐效果。
+        // 自然宽 +1 DIP 余量，避免按恰好等宽排版时末词因舍入折到下一行。
+        const float natural = MeasureText(text_, role_, kUnbounded).w + 1.0f;
+        float width = natural;
+        if (Bounded(available.w)) {
+            width = align_ == Align::Leading ? std::min(natural, available.w) : available.w;
+        }
+        width = std::max(width, 1.0f);
         return {width, MeasureWrapped(text_, role_, width)};
     }
     Size size = MeasureText(text_, role_, available.w > 0.0f ? available.w : 1.0e5f);
